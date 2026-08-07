@@ -1,0 +1,1749 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>YOLO26 Detect 第一层卷积计算过程 · 动画演示</title>
+  <style>
+    /* ---------- 全局 CSS 变量（颜色语义全页统一，JS 里也会读写 --cell 等尺寸变量） ---------- */
+    :root {
+      --bg: #0d1117;         /* 页面主背景（深色） */
+      --bg2: #10121a;        /* 背景渐变下端色 */
+      --panel: #161b22;      /* 卡片/章节面板底色 */
+      --panel2: #1a2029;     /* 面板内嵌套块的底色（略浅一档） */
+      --border: #2b323c;     /* 统一边框色 */
+      --text: #d7dde6;       /* 正文文字色 */
+      --muted: #8b949e;      /* 次要说明文字色 */
+      --dim: #596275;        /* 更弱的辅助色（序号、占位符等） */
+      --R: #ff8787;          /* R（红）通道色 */
+      --G: #8ce99a;          /* G（绿）通道色 */
+      --B: #74c0fc;          /* B（蓝）通道色 */
+      --win: #ffd43b;        /* 卷积核/滑窗高亮黄 */
+      --out: #3ddad7;        /* 输出特征图青色 */
+      --accent: #ffa94d;     /* 品牌/强调橙 */
+    }
+
+    /* 全局盒模型：所有元素统一 border-box，去掉默认内外边距，方便精确排版 */
+    * {
+      box-sizing: border-box;
+      margin: 0;
+      padding: 0;
+    }
+
+    /* 锚点跳转平滑滚动（侧边导航点击时） */
+    html {
+      scroll-behavior: smooth;
+    }
+
+    /* 页面整体：深色渐变背景 + 中文字体栈 */
+    body {
+      background: linear-gradient(180deg, var(--bg) 0%, var(--bg2) 100%);
+      color: var(--text);
+      font-family: "Segoe UI", "PingFang SC", "Microsoft YaHei", system-ui, sans-serif;
+      min-height: 100vh;
+    }
+
+    /* 等宽字体工具类（用于 ONNX 节点名等代码式文本） */
+    .mono {
+      font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace;
+    }
+
+    /* ---------- 顶部控制条（吸顶：滚动时始终可见，毛玻璃背景） ---------- */
+    #topbar {
+      position: sticky;
+      top: 0;
+      z-index: 50;
+      display: flex;
+      align-items: center;
+      gap: 14px;
+      padding: 10px 20px;
+      background: rgba(13, 17, 23, .92);
+      backdrop-filter: blur(6px);
+      border-bottom: 1px solid var(--border);
+    }
+
+    /* 品牌标题（左侧），小字副标题用 muted 弱化 */
+    #topbar .brand {
+      font-weight: 700;
+      letter-spacing: .5px;
+      color: var(--accent);
+      white-space: nowrap;
+    }
+
+    #topbar .brand small {
+      color: var(--muted);
+      font-weight: 400;
+      margin-left: 8px;
+    }
+
+    /* 控制按钮区：margin-left:auto 推到顶栏最右侧 */
+    .ctrl {
+      display: flex;
+      gap: 8px;
+      align-items: center;
+      margin-left: auto;
+    }
+
+    /* 控制按钮（播放/单步/重置），等宽字体，hover 时边框变强调色 */
+    .cbtn {
+      background: var(--panel2);
+      color: var(--text);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 6px 14px;
+      font-size: 13px;
+      cursor: pointer;
+      font-family: ui-monospace, Menlo, Consolas, monospace;
+      transition: border-color .15s, background .15s;
+    }
+
+    .cbtn:hover {
+      border-color: var(--accent);
+      background: #222a35;
+    }
+
+    /* 主按钮（播放）用绿色底突出 */
+    .cbtn.primary {
+      background: #2b3a2e;
+      border-color: #3f5c45;
+    }
+
+    /* 「当前控制：xxx」标签，显示顶部按钮正控制哪一节 */
+    #activeSecLabel {
+      color: var(--muted);
+      font-size: 12px;
+      min-width: 130px;
+      text-align: right;
+    }
+
+    /* ---------- 布局（整体 flex：左侧导航 + 右侧主内容，max-width 1760px 宽屏利用） ---------- */
+    .layout {
+      display: flex;
+      max-width: 1760px; /* 宽屏充分利用：1920 屏两侧仅留 ~80px */
+      margin: 0 auto;
+      align-items: flex-start;
+    }
+
+    /* 侧边导航：吸顶跟随滚动，固定宽 168px */
+    #sidenav {
+      position: sticky;
+      top: 57px;
+      flex: 0 0 168px;
+      padding: 24px 10px;
+    }
+
+    /* 导航条目：默认左边框透明，当前节高亮为橙色竖条 */
+    #sidenav a {
+      display: block;
+      padding: 8px 12px;
+      margin: 2px 0;
+      color: var(--muted);
+      text-decoration: none;
+      font-size: 13px;
+      border-left: 3px solid transparent;
+      border-radius: 0 8px 8px 0;
+      transition: all .15s;
+    }
+
+    #sidenav a:hover {
+      color: var(--text);
+      background: var(--panel);
+    }
+
+    /* 当前可见章节对应的导航项（由 IntersectionObserver 切换 .active） */
+    #sidenav a.active {
+      color: var(--accent);
+      border-left-color: var(--accent);
+      background: var(--panel);
+    }
+
+    /* 导航项前的章节序号 */
+    #sidenav a .idx {
+      color: var(--dim);
+      margin-right: 6px;
+      font-family: ui-monospace, Menlo, monospace;
+    }
+
+    /* 主内容列：占满剩余宽度，min-width:0 允许内部网格收缩 */
+    main {
+      flex: 1;
+      min-width: 0;
+      padding: 0 24px 80px;
+    }
+
+    /* 每个章节一张圆角卡片；scroll-margin-top 避免锚点跳转被吸顶栏遮挡 */
+    section {
+      margin: 26px 0;
+      padding: 26px 28px;
+      background: var(--panel);
+      border: 1px solid var(--border);
+      border-radius: 14px;
+      scroll-margin-top: 70px;
+    }
+
+    /* 章节标题 */
+    h2 {
+      font-size: 20px;
+      margin-bottom: 6px;
+      color: var(--text);
+    }
+
+    /* 标题右侧的参数小标签（如 kernel 3×3 · stride 2） */
+    h2 .tag {
+      display: inline-block;
+      font-size: 11px;
+      vertical-align: middle;
+      background: #2b3a2e;
+      color: #9be2a8;
+      border-radius: 6px;
+      padding: 2px 8px;
+      margin-left: 10px;
+      font-family: ui-monospace, Menlo, monospace;
+    }
+
+    /* 章节副标题/说明段落 */
+    .sub {
+      color: var(--muted);
+      font-size: 13px;
+      margin-bottom: 16px;
+      line-height: 1.6;
+    }
+
+    /* 每节右上角「↺ 重播本节」按钮 */
+    .replay {
+      float: right;
+      background: transparent;
+      color: var(--muted);
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      padding: 4px 10px;
+      font-size: 12px;
+      cursor: pointer;
+    }
+
+    .replay:hover {
+      color: var(--accent);
+      border-color: var(--accent);
+    }
+
+    /* ---------- Hero（第 0 节概览：标题 + 输入→Conv→输出流程图 + 属性卡片） ---------- */
+    #sec0 h1 {
+      font-size: 28px;
+      margin-bottom: 4px;
+    }
+
+    /* 标题里「YOLO26 Detect」的强调色 */
+    #sec0 h1 .y {
+      color: var(--accent);
+    }
+
+    /* 流程图横排容器：输入框 → 箭头 → Conv 框 → 箭头 → 输出框 */
+    .flow {
+      display: flex;
+      align-items: center;
+      gap: 0;
+      margin: 22px 0 8px;
+      flex-wrap: wrap;
+    }
+
+    /* 流程图中的节点框（输入/Conv/输出共用） */
+    .fbox {
+      background: var(--panel2);
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      padding: 12px 18px;
+      text-align: center;
+    }
+
+    /* 节点框第一行小字（如「输入 images (NCHW)」） */
+    .fbox .t1 {
+      font-size: 13px;
+      color: var(--muted);
+    }
+
+    /* 节点框第二行大字（尺寸，等宽字体） */
+    .fbox .t2 {
+      font-size: 17px;
+      font-weight: 700;
+      margin-top: 2px;
+      font-family: ui-monospace, Menlo, monospace;
+    }
+
+    /* 三类节点框的尺寸数字配色：输入=通道蓝、Conv=核黄、输出=输出青 */
+    .fbox.in .t2 {
+      color: var(--B);
+    }
+
+    .fbox.conv .t2 {
+      color: var(--win);
+    }
+
+    .fbox.out .t2 {
+      color: var(--out);
+    }
+
+    /* 流程箭头：渐变文字 + 位移动画，制造「数据流动」感 */
+    .farrow {
+      font-family: ui-monospace, Menlo, monospace;
+      color: var(--dim);
+      padding: 0 10px;
+      font-size: 18px;
+      white-space: nowrap;
+      background: linear-gradient(90deg, var(--dim), var(--accent), var(--dim));
+      -webkit-background-clip: text;
+      background-clip: text;
+      background-size: 200% 100%;
+      -webkit-text-fill-color: transparent;
+      animation: flowdash 2.2s linear infinite;
+    }
+
+    /* 箭头流动动画关键帧 */
+    @keyframes flowdash {
+      to {
+        background-position: -200% 0;
+      }
+    }
+
+    /* 概览页底部两张卡片（节点属性 / 权重偏置统计）两列网格 */
+    .cards {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 14px;
+      margin-top: 16px;
+    }
+
+    .card {
+      background: var(--panel2);
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      padding: 14px 16px;
+    }
+
+    .card h3 {
+      font-size: 13px;
+      color: var(--muted);
+      margin-bottom: 10px;
+      font-weight: 600;
+    }
+
+    /* 卡片内的键值对行（属性名在左、值在右） */
+    .kv {
+      display: flex;
+      justify-content: space-between;
+      font-size: 13px;
+      padding: 3px 0;
+      font-family: ui-monospace, Menlo, monospace;
+    }
+
+    .kv .k {
+      color: var(--muted);
+    }
+
+    .kv .v {
+      color: var(--text);
+    }
+
+    /* 需要高亮的值（核尺寸/步长/输出尺寸等） */
+    .kv .v.hl {
+      color: var(--win);
+    }
+
+    /* ---------- 网格通用（第 1、2 节的 2D 特征图网格 + 滑窗高亮框） ---------- */
+    /* 一节内的横排舞台：多个网格/面板并排，窄屏自动换行 */
+    .stage {
+      display: flex;
+      gap: 26px;
+      flex-wrap: wrap;
+      align-items: flex-start;
+    }
+
+    /* 网格 + 滑窗框的定位容器（winframe 相对它绝对定位） */
+    .gridwrap {
+      position: relative;
+    }
+
+    /* 特征图网格本体：列数/列宽由 JS 用 gridTemplateColumns 写入 */
+    .grid {
+      display: grid;
+      gap: 2px;
+    }
+
+    /* 2D 网格单元格：尺寸由 JS 通过 --cell 变量控制（N 大时自动缩小），字号用 --cfz */
+    .cell {
+      width: var(--cell, 20px);
+      height: var(--cell, 20px);
+      border-radius: 3px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-family: ui-monospace, Menlo, Consolas, monospace;
+      font-size: var(--cfz, 8.5px);
+      color: #10141b;
+      background: #232a35;
+      user-select: none;
+      transition: opacity .25s, transform .25s, background .2s;
+    }
+
+    /* pad 填充格：深色底 + 虚线框，与真实数据格区分 */
+    .cell.pad {
+      background: #171c24;
+      border: 1px dashed #3a4150;
+      color: var(--dim);
+    }
+
+    /* pad 格「生长」动画的两个状态：grow=收起（初始），shown=展开 */
+    .cell.grow {
+      opacity: 0;
+      transform: scale(.3);
+    }
+
+    .cell.shown {
+      opacity: 1;
+      transform: scale(1);
+    }
+
+    /* 网格上方的小标题（如「R 通道 12×12（pad 后）」） */
+    .glabel {
+      font-size: 12px;
+      color: var(--muted);
+      margin-bottom: 6px;
+      font-family: ui-monospace, Menlo, monospace;
+    }
+
+    .glabel b {
+      font-weight: 700;
+    }
+
+    /* 滑窗高亮框：绝对定位罩在网格上，JS 用 transform 平移实现滑动；尺寸由 --winf 控制 */
+    .winframe {
+      position: absolute;
+      top: 0;
+      left: 0;
+      width: var(--winf, 68px);
+      height: var(--winf, 68px);
+      border: 2px solid var(--win);
+      border-radius: 5px;
+      box-shadow: 0 0 14px rgba(255, 212, 59, .45), inset 0 0 10px rgba(255, 212, 59, .15);
+      pointer-events: none;
+      opacity: 0;
+      transition: transform .5s cubic-bezier(.4, 0, .2, 1), opacity .3s;
+    }
+
+    /* 加上 .on 才显示（初始隐藏，等第一次滑窗时再亮起） */
+    .winframe.on {
+      opacity: 1;
+    }
+
+    /* 输出网格（第 2 节右侧的输出特征图单元格，尺寸由 --ocell 控制） */
+    /* 输出单元格三态：默认=未算（文字透明只显示占位点），filled=已算出，hot=刚算出的当前格 */
+    .outcell {
+      width: var(--ocell, 34px);
+      height: var(--ocell, 34px);
+      border-radius: 4px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-family: ui-monospace, Menlo, monospace;
+      font-size: 7.5px;
+      background: #161c22;
+      border: 1px solid #26303b;
+      color: transparent;
+      transition: background .3s, color .3s;
+    }
+
+    /* 已填入结果的输出格：淡青底 + 显示数值 */
+    .outcell.filled {
+      background: rgba(61, 218, 215, .16);
+      border-color: rgba(61, 218, 215, .45);
+      color: var(--out);
+    }
+
+    /* 当前刚算出的输出格：更亮 + 发光，下一步退回 filled */
+    .outcell.hot {
+      background: rgba(61, 218, 215, .45);
+      border-color: var(--out);
+      color: #eafffe;
+      box-shadow: 0 0 12px rgba(61, 218, 215, .5);
+    }
+
+    /* 公式栏（左侧黄色竖条的等宽公式展示区） */
+    .formula {
+      background: #0f141b;
+      border: 1px solid var(--border);
+      border-left: 4px solid var(--win);
+      border-radius: 8px;
+      padding: 12px 16px;
+      margin: 14px 0;
+      font-family: ui-monospace, Menlo, Consolas, monospace;
+      font-size: 15px;
+      line-height: 1.7;
+      color: var(--text);
+      overflow-x: auto;
+      white-space: nowrap;
+    }
+
+    /* 公式内配色：n=高亮数字（核黄）、b=偏置（绿）、y=结果（输出青加粗）、m=注释灰 */
+    .formula .n {
+      color: var(--win);
+    }
+
+    .formula .b {
+      color: var(--G);
+    }
+
+    .formula .y {
+      color: var(--out);
+      font-weight: 700;
+    }
+
+    .formula .m {
+      color: var(--muted);
+    }
+
+    /* 迷你 3x3 表格（第 2 节详情区：输入补丁 x 与核切片 w 的并排展示） */
+    .mini {
+      display: grid;
+      grid-template-columns: repeat(3, 46px);
+      gap: 3px;
+    }
+
+    /* 迷你表格单元格 */
+    .mcell {
+      width: 46px;
+      height: 30px;
+      border-radius: 4px;
+      font-size: 10px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-family: ui-monospace, Menlo, monospace;
+      background: #1c232d;
+      border: 1px solid #2b3440;
+      color: var(--text);
+    }
+
+    /* 迷你表格里的 pad 格（虚线） */
+    .mcell.pad {
+      background: #151a21;
+      border-style: dashed;
+      color: var(--dim);
+    }
+
+    /* 迷你表格里的权重格（核黄色调） */
+    .mcell.w {
+      color: var(--win);
+      border-color: #4a3f1e;
+      background: #231f12;
+    }
+
+    /* 两块迷你表格之间的运算符（⊙ →） */
+    .op {
+      align-self: center;
+      font-size: 18px;
+      color: var(--muted);
+      padding: 0 10px;
+      font-family: ui-monospace, Menlo, monospace;
+    }
+
+    /* 单通道计算块：通道名 + 输入补丁 ⊙ 核切片 → 部分和，一行排开 */
+    .chblock {
+      display: flex;
+      gap: 10px;
+      align-items: center;
+      padding: 10px 12px;
+      background: var(--panel2);
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      margin-bottom: 10px;
+    }
+
+    /* 通道名（R/G/B 各自配色） */
+    .chname {
+      font-size: 12px;
+      font-weight: 700;
+      width: 16px;
+      font-family: ui-monospace, Menlo, monospace;
+    }
+
+    .chname.R {
+      color: var(--R);
+    }
+
+    .chname.G {
+      color: var(--G);
+    }
+
+    .chname.B {
+      color: var(--B);
+    }
+
+    /* 通道部分和（靠右对齐） */
+    .partial {
+      margin-left: auto;
+      text-align: right;
+      font-family: ui-monospace, Menlo, monospace;
+      font-size: 12px;
+    }
+
+    .partial .lab {
+      color: var(--muted);
+      font-size: 10px;
+      display: block;
+    }
+
+    .partial .val {
+      color: var(--text);
+      font-size: 14px;
+    }
+
+    /* 乘积清单（第 3 节：三列分别列出 R/G/B 通道的 9 项乘积） */
+    .plist {
+      display: grid;
+      grid-template-columns: repeat(3, 1fr);
+      gap: 14px;
+    }
+
+    /* 每列标题（通道 X · 9 项乘积） */
+    .pcol h4 {
+      font-size: 12px;
+      margin-bottom: 6px;
+      font-family: ui-monospace, Menlo, monospace;
+    }
+
+    /* 单个乘积行：初始隐藏（左移+透明），逐项揭示时加 .on 滑入 */
+    .prow {
+      font-family: ui-monospace, Menlo, monospace;
+      font-size: 11px;
+      padding: 3px 8px;
+      margin: 2px 0;
+      background: var(--panel2);
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      opacity: 0;
+      transform: translateX(-8px);
+      transition: opacity .25s, transform .25s;
+      display: flex;
+      justify-content: space-between;
+      gap: 8px;
+    }
+
+    .prow.on {
+      opacity: 1;
+      transform: none;
+    }
+
+    /* 乘积结果值（输出青） */
+    .prow .pv {
+      color: var(--out);
+    }
+
+    /* 汇总大行（第 3 节底部：部分和→加偏置→最终结果，逐行浮现） */
+    .bigline {
+      font-family: ui-monospace, Menlo, monospace;
+      font-size: 15px;
+      padding: 10px 14px;
+      margin-top: 10px;
+      background: #0f141b;
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      opacity: 0;
+      transform: translateY(6px);
+      transition: all .35s;
+    }
+
+    .bigline.on {
+      opacity: 1;
+      transform: none;
+    }
+
+    /* 汇总行内配色与公式栏一致 */
+    .bigline .y {
+      color: var(--out);
+      font-weight: 700;
+    }
+
+    .bigline .n {
+      color: var(--win);
+    }
+
+    .bigline .b {
+      color: var(--G);
+    }
+
+    .bigline .m {
+      color: var(--muted);
+    }
+
+    /* 第四节（canvas 伪 3D 堆叠图 + 计数器） */
+    /* 第四节 canvas：画 32 张特征图沿通道维堆叠的伪 3D 示意图 */
+    #stackCanvas {
+      display: block;
+      background: #0f141b;
+      border: 1px solid var(--border);
+      border-radius: 10px;
+    }
+
+    /* 大计数器（卷积核 x/32 ⇒ 输出通道 x/32） */
+    .count {
+      font-family: ui-monospace, Menlo, monospace;
+      font-size: 15px;
+      margin: 10px 0;
+    }
+
+    .count .n {
+      color: var(--win);
+      font-size: 22px;
+      font-weight: 700;
+    }
+
+    .count .o {
+      color: var(--out);
+      font-size: 22px;
+      font-weight: 700;
+    }
+
+    /* 总结（第六节：三张总结卡片 + 底部说明条） */
+    .sumgrid {
+      display: grid;
+      grid-template-columns: repeat(3, 1fr);
+      gap: 14px;
+    }
+
+    .sumcard {
+      background: var(--panel2);
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      padding: 16px;
+    }
+
+    .sumcard .lab {
+      font-size: 12px;
+      color: var(--muted);
+      margin-bottom: 8px;
+    }
+
+    .sumcard .eq {
+      font-family: ui-monospace, Menlo, monospace;
+      font-size: 14px;
+      line-height: 1.8;
+    }
+
+    .sumcard .eq .hl {
+      color: var(--win);
+      font-weight: 700;
+    }
+
+    .sumcard .eq .hl2 {
+      color: var(--out);
+      font-weight: 700;
+    }
+
+    /* 底部「这一层在 YOLO26 中的作用」说明条（青绿色调） */
+    .note {
+      margin-top: 16px;
+      padding: 14px 16px;
+      border-radius: 10px;
+      font-size: 14px;
+      line-height: 1.8;
+      background: #12211f;
+      border: 1px solid #23423d;
+      color: #b9e6e0;
+    }
+
+    /* 各节底部的状态行（进度计数，等宽小字） */
+    .status {
+      font-size: 12px;
+      color: var(--muted);
+      font-family: ui-monospace, Menlo, monospace;
+      margin-top: 8px;
+    }
+
+    .status b {
+      color: var(--win);
+    }
+
+    /* 第五节 3D 全景 · 体素方块（浅色展台，与页面深色形成对比） */
+    /* 3D 舞台容器：固定高 560px，Three.js canvas 插入其中；抓手光标提示可拖拽 */
+    #s5-stage {
+      position: relative;
+      height: 560px;
+      overflow: hidden;
+      cursor: grab;
+      background: #eceff1;
+      border: 1px solid var(--border);
+      border-radius: 10px;
+    }
+
+    /* 拖拽中变为握紧手势 */
+    #s5-stage.grabbing {
+      cursor: grabbing;
+    }
+
+    #s5-stage canvas {
+      display: block;
+    }
+
+    /* 3D 场景上的 HTML 标注（输入/卷积核/输出）：初始藏在屏外，JS 每帧投影到正确位置 */
+    .s5-tag {
+      position: absolute;
+      left: -999px;
+      top: -999px;
+      transform: translate(-50%, -130%);
+      background: rgba(255, 255, 255, .88);
+      border: 1px solid #c3ccd4;
+      border-radius: 6px;
+      box-shadow: 0 1px 4px rgba(30, 40, 50, .14);
+      padding: 3px 9px;
+      font-size: 12px;
+      font-family: ui-monospace, Menlo, monospace;
+      color: #37414d;
+      pointer-events: none;
+      white-space: nowrap;
+      z-index: 2;
+    }
+
+    .s5-tag b {
+      font-weight: 700;
+    }
+
+    /* 舞台右下角的操作提示（左键旋转 · 右键平移 · 滚轮缩放） */
+    #s5-hint {
+      position: absolute;
+      right: 10px;
+      bottom: 8px;
+      z-index: 2;
+      font-size: 11px;
+      color: #8a95a1;
+      pointer-events: none;
+      font-family: ui-monospace, Menlo, monospace;
+    }
+
+    /* WebGL 不可用时的降级提示（默认隐藏，JS 检测到无 WebGL 时给舞台加 .nogl 显示） */
+    #s5-fallback {
+      display: none;
+      position: absolute;
+      inset: 0;
+      z-index: 3;
+      align-items: center;
+      justify-content: center;
+      text-align: center;
+      color: #5a6672;
+      font-size: 14px;
+      line-height: 2;
+      padding: 40px;
+    }
+
+    #s5-stage.nogl {
+      cursor: default;
+    }
+
+    #s5-stage.nogl #s5-fallback {
+      display: flex;
+    }
+
+    #s5-stage.nogl .s5-tag,
+    #s5-stage.nogl #s5-hint {
+      display: none;
+    }
+
+    /* 窄屏（≤1180px）隐藏侧边导航，主内容占满 */
+    @media (max-width:1180px) {
+      #sidenav {
+        display: none;
+      }
+    }
+  </style>
+</head>
+
+<body>
+  <!-- ============ 顶部控制条（吸顶）：播放/单步/重置 + 速度滑块，控制「当前可见」的章节 ============ -->
+  <!-- 约定：HTML 中所有 <span data-v="..."> 都是占位数字，加载时由 fillCfgText() 从 Global_CFG 计算填充，改配置即全页生效 -->
+  <header id="topbar">
+    <div class="brand">Animated AI 风格 · Conv 演示<small>单文件 / 零依赖</small></div>
+    <div class="ctrl">
+      <!-- 当前受控章节名（由 IntersectionObserver 滚动跟踪更新） -->
+      <span id="activeSecLabel">当前控制：滑窗卷积</span>
+      <button class="cbtn primary" id="btnPlay">▶ 播放</button>
+      <button class="cbtn" id="btnStep">⏭ 单步</button>
+      <button class="cbtn" id="btnReset">↺ 重置</button>
+      <!-- 播放速度滑块：0.1x–50x 对数刻度，JS 里用 SPEED = 10^value 换算 -->
+      <span id="speedWrap" title="播放速度 0.1x – 50x（对数刻度）">
+        <input type="range" id="speedSlider" min="-1" max="1.699" step="0.001" value="0"
+          style="width:110px; vertical-align:middle; accent-color:#3ddad7;">
+        <span id="speedLabel" style="font-size:12px; color:var(--muted); min-width:52px; display:inline-block;">速度 1x</span>
+      </span>
+    </div>
+  </header>
+
+  <div class="layout">
+    <!-- ============ 侧边导航（吸顶）：当前章节高亮，窄屏（≤1180px）隐藏 ============ -->
+    <nav id="sidenav">
+      <a href="#sec0" data-sec="sec0"><span class="idx">0</span>概览</a>
+      <a href="#sec1" data-sec="sec1"><span class="idx">1</span>Padding 填充</a>
+      <a href="#sec2" data-sec="sec2" class="active"><span class="idx">2</span>滑窗卷积</a>
+      <a href="#sec3" data-sec="sec3"><span class="idx">3</span>真实数值特写</a>
+      <a href="#sec4" data-sec="sec4"><span class="idx">4</span><span data-v="outCap">32</span> 个卷积核</a>
+      <a href="#sec5" data-sec="sec5"><span class="idx">5</span>3D 全景演示</a>
+      <a href="#sec6" data-sec="sec6"><span class="idx">6</span>总结</a>
+    </nav>
+
+    <main>
+      <!-- ============ 0. 概览 ============ -->
+      <!-- 本节无动画：节点信息（/model.0/conv/Conv）、输入→Conv→输出流程图、节点属性与权重/偏置统计（Netron 实测值） -->
+      <section id="sec0">
+        <h1><span class="y">YOLO26 Detect</span> 第一层卷积计算过程</h1>
+        <p class="sub">节点 <span class="mono">/model.0/conv/Conv</span>（ai.onnx v11）· 属性与尺寸随全局配置 Global_CFG 演示（真实模型为 1×3×640×640 → 1×32×320×320）；权重/偏置统计值来自 Netron 实测截图，如实展示。</p>
+        <div class="flow">
+          <div class="fbox in">
+            <div class="t1">输入 images (NCHW)</div>
+            <div class="t2">1×<span data-v="inC">3</span>×<span data-v="inN">32</span>×<span data-v="inN">32</span></div>
+          </div>
+          <div class="farrow">────▶</div>
+          <div class="fbox conv">
+            <div class="t1">Conv <span data-v="kSize">3</span>×<span data-v="kSize">3</span> · stride <span data-v="stride">2</span> · pad <span data-v="pad">1</span></div>
+            <div class="t2">/model.0/conv/Conv</div>
+          </div>
+          <div class="farrow">────▶</div>
+          <div class="fbox out">
+            <div class="t1">输出特征图</div>
+            <div class="t2">1×<span data-v="outCap">32</span>×<span data-v="SIDE">16</span>×<span data-v="SIDE">16</span></div>
+          </div>
+        </div>
+        <div class="cards">
+          <div class="card">
+            <h3>节点属性（Conv）</h3>
+            <div class="kv"><span class="k">kernel_shape</span><span class="v hl">[<span data-v="kSize">3</span>, <span data-v="kSize">3</span>]</span></div>
+            <div class="kv"><span class="k">strides</span><span class="v hl">[<span data-v="stride">2</span>, <span data-v="stride">2</span>]</span></div>
+            <div class="kv"><span class="k">pads</span><span class="v hl">[<span data-v="pad">1</span>, <span data-v="pad">1</span>, <span data-v="pad">1</span>, <span data-v="pad">1</span>]</span></div>
+            <div class="kv"><span class="k">dilations</span><span class="v">[1, 1]</span></div>
+            <div class="kv"><span class="k">group</span><span class="v">1</span></div>
+            <div class="kv"><span class="k">输出尺寸</span><span class="v hl">⌊(<span data-v="inN">32</span>+2×<span data-v="pad">1</span>−<span data-v="kSize">3</span>)/<span data-v="stride">2</span>⌋+1 = <span data-v="SIDE">16</span></span></div>
+          </div>
+          <div class="card">
+            <h3>权重 / 偏置统计（float32）</h3>
+            <div class="kv"><span class="k">model.0.conv.weight</span><span class="v">形状 [32, 3, 3, 3]</span></div>
+            <div class="kv"><span class="k">weight min / max</span><span class="v">-144.189 / 130.432</span></div>
+            <div class="kv"><span class="k">weight mean / std</span><span class="v">-0.0756 / 20.481</span></div>
+            <div class="kv"><span class="k">model.0.conv.bias</span><span class="v">形状 [32]</span></div>
+            <div class="kv"><span class="k">bias min / max</span><span class="v">-23.340 / 12.781</span></div>
+            <div class="kv"><span class="k">bias mean / std</span><span class="v">0.776 / 5.117</span></div>
+          </div>
+        </div>
+      </section>
+
+      <!-- ============ 1. Padding ============ -->
+      <!-- 本节演示：输入特征图四周按顺时针逐格「生长」出一圈 0 填充（pad=1），并给出填充后尺寸公式 -->
+      <section id="sec1">
+        <button class="replay" data-replay="sec1">↺ 重播本节</button>
+        <h2>第 1 步：Padding 零填充 <span class="tag">pads = [<span data-v="pad">1</span>,<span data-v="pad">1</span>,<span data-v="pad">1</span>,<span data-v="pad">1</span>]</span></h2>
+        <p class="sub">输入特征图 <span data-v="inN">32</span>×<span data-v="inN">32</span>。四周「生长」出 <span data-v="pad">1</span> 圈 0 填充格（pad 后 <span data-v="PN">34</span>×<span data-v="PN">34</span>），使窗口在边缘位置也能完整取到 <span data-v="kSize">3</span>×<span data-v="kSize">3</span> 邻域。</p>
+        <div class="stage">
+          <div>
+            <div class="glabel"><b>输入特征图（单通道）</b> <span data-v="inN">32</span>×<span data-v="inN">32</span> → pad <span data-v="pad">1</span> → <span data-v="PN">34</span>×<span data-v="PN">34</span></div>
+            <div class="gridwrap">
+              <div class="grid" id="s1-grid"></div>
+            </div>
+            <div class="status" id="s1-status">已填充 0 值：<b>0</b> / <span data-v="padCells">132</span></div>
+          </div>
+          <div style="flex:1; min-width:300px;">
+            <div class="formula" id="s1-formula">
+              <span class="m">// 填充后尺寸</span><br>
+              W_out = W + 2P = <span data-v="inN">32</span> + 2×<span class="n" data-v="pad">1</span> = <span class="y" data-v="PN">34</span><br>
+              H_out = H + 2P = <span data-v="inN">32</span> + 2×<span class="n" data-v="pad">1</span> = <span class="y" data-v="PN">34</span>
+            </div>
+            <div class="formula" style="border-left-color:var(--border); font-size:13px;">
+              <span class="m">随后 stride=<span data-v="stride">2</span> 滑窗：⌊(<span data-v="PN">34</span>−<span data-v="kSize">3</span>)/<span data-v="stride">2</span>⌋+1 = <span data-v="SIDE">16</span>×<span data-v="SIDE">16</span>（真实模型 640→642→320 同理）</span>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <!-- ============ 2. 滑窗卷积 ============ -->
+      <!-- 本节演示：R/G/B 三通道上 3×3 窗口以 stride=2 同步滑动，每停一处算出 1 个输出像素（逐元素乘加 + bias），
+           下方详情区展示当前窗口的输入补丁、核切片与各通道部分和 -->
+      <section id="sec2">
+        <button class="replay" data-replay="sec2">↺ 重播本节</button>
+        <h2>第 2 步：滑窗卷积（3 通道同步） <span class="tag">kernel <span data-v="kSize">3</span>×<span data-v="kSize">3</span> · stride <span data-v="stride">2</span></span></h2>
+        <p class="sub">R/G/B 三个通道（各 <span data-v="inN">32</span>×<span data-v="inN">32</span>，pad 后 <span data-v="PN">34</span>×<span data-v="PN">34</span>）上，<span data-v="kSize">3</span>×<span data-v="kSize">3</span> 窗口以 stride=<span data-v="stride">2</span> 同步滑动。每停一处：<span data-v="muls">27</span> 个数逐元素相乘求和、加 bias，写入输出格。输出 <span data-v="SIDE">16</span>×<span data-v="SIDE">16</span>。</p>
+        <div class="formula" id="s2-formula">y[r,c] = Σ<sub><span data-v="muls">27</span></sub>( xᵢ · wᵢ ) + b <span class="m">—
+            点击「播放」或「单步」开始滑窗</span></div>
+        <div class="stage">
+          <div class="gridwrap">
+            <div class="glabel"><b style="color:var(--R)">R 通道</b> <span data-v="PN">12</span>×<span data-v="PN">12</span>（pad 后）</div>
+            <div class="grid" id="s2-g0"></div>
+            <div class="winframe" id="s2-f0"></div>
+          </div>
+          <div class="gridwrap">
+            <div class="glabel"><b style="color:var(--G)">G 通道</b> <span data-v="PN">12</span>×<span data-v="PN">12</span>（pad 后）</div>
+            <div class="grid" id="s2-g1"></div>
+            <div class="winframe" id="s2-f1"></div>
+          </div>
+          <div class="gridwrap">
+            <div class="glabel"><b style="color:var(--B)">B 通道</b> <span data-v="PN">12</span>×<span data-v="PN">12</span>（pad 后）</div>
+            <div class="grid" id="s2-g2"></div>
+            <div class="winframe" id="s2-f2"></div>
+          </div>
+          <div style="max-width:200px;">
+            <div class="glabel"><b style="color:var(--out)">输出通道 #0</b> <span data-v="SIDE">16</span>×<span data-v="SIDE">16</span></div>
+            <div class="grid" id="s2-out"></div>
+            <div class="status" id="s2-status">位置 <b>0</b> / <span data-v="PERK">25</span> · 窗口左上角 (r,c) = (0,0)，每次跳 <span data-v="stride">2</span> 格</div>
+          </div>
+        </div>
+        <div id="s2-detail" style="margin-top:16px;"></div>
+      </section>
+
+      <!-- ============ 3. 真实数值特写 ============ -->
+      <!-- 本节演示：放大单个输出像素 y[1,2] 的完整计算——27 项乘积逐项揭示，再汇总部分和、加偏置得最终结果 -->
+      <section id="sec3">
+        <button class="replay" data-replay="sec3">↺ 重播本节</button>
+        <h2>第 3 步：真实数值演算特写 <span class="tag">1 个输出像素 = <span data-v="muls">27</span> 次乘加</span></h2>
+        <p class="sub">放大输出位置 (r,c)=(1,2) 的完整计算。输入为示意像素值（0–255）；权重值按真实权重分布 <span class="mono">N(-0.076, 20.48²)</span>
+          采样生成，偏置按 <span class="mono">N(0.776, 5.117²)</span> 采样。</p>
+        <div class="formula" id="s3-formula">y[1,2] = Σ<sub>ch∈{R,G,B}</sub> Σ<sub><span data-v="kSize">3</span>×<span data-v="kSize">3</span></sub>( x · w ) + b <span
+            class="m">— 逐项揭示中…</span></div>
+        <div class="plist" id="s3-plist"></div>
+        <div class="bigline" id="s3-line1"></div>
+        <div class="bigline" id="s3-line2"></div>
+        <div class="bigline" id="s3-line3"></div>
+      </section>
+
+      <!-- ============ 4. 32 个卷积核 ============ -->
+      <!-- 本节演示：canvas 伪 3D 画法，逐个生成卷积核 → 每个核产出一张特征图薄片 → 沿通道维堆叠成输出张量 -->
+      <section id="sec4">
+        <button class="replay" data-replay="sec4">↺ 重播本节</button>
+        <h2>第 4 步：<span data-v="outCap">32</span> 个卷积核 → <span data-v="outCap">32</span> 个输出通道 <span class="tag">weight [<span data-v="outCap">32</span>,<span data-v="inC">3</span>,<span data-v="kSize">3</span>,<span data-v="kSize">3</span>]</span></h2>
+        <p class="sub">上面演示的只是「第 0 个卷积核」。完整层有 <span data-v="outCap">32</span> 个不同的核：每个核（<span data-v="kSize">3</span>×<span data-v="kSize">3</span>×<span data-v="inC">3</span> = <span data-v="muls">27</span> 个权重 + 1 个偏置）扫过整个输入，产出一张 <span data-v="SIDE">16</span>×<span data-v="SIDE">16</span> 特征图，<span data-v="outCap">32</span> 张堆叠成输出张量。
+        </p>
+        <div class="count">卷积核 <span class="n" id="s4-kn">0</span> / <span data-v="outCap">32</span> &nbsp;⇒&nbsp; 输出通道 <span class="o"
+            id="s4-cn">0</span> / <span data-v="outCap">32</span></div>
+        <canvas id="stackCanvas" width="760" height="330"></canvas>
+        <div class="status">每生成 1 个核 → 产出 1 张 <span data-v="SIDE">16</span>×<span data-v="SIDE">16</span> 特征图薄片 → 堆叠为 <b>1×<span data-v="outCap">32</span>×<span data-v="SIDE">16</span>×<span data-v="SIDE">16</span></b></div>
+      </section>
+
+      <!-- ============ 5. 3D 全景演示 ============ -->
+      <!-- 本节演示：Three.js 体素全景——输入体（含 pad 圈）→ 滑窗逐行扫描 → 一排真实权重卷积核（亮度编码权重值）
+           → 输出线框盒逐格长出体素；可左键旋转 / 右键或 Shift 平移 / 滚轮缩放；无 WebGL 时显示降级提示 -->
+      <section id="sec5">
+        <button class="replay" data-replay="sec5">↺ 重播本节</button>
+        <h2>第 5 步：3D 全景演示 · 体素方块版（可旋转 / 平移 / 缩放视角） <span class="tag">Three.js · <span data-v="inC">3</span>×<span data-v="inN">32</span>×<span data-v="inN">32</span> → <span data-v="outCap">32</span>×<span data-v="SIDE">16</span>×<span data-v="SIDE">16</span></span></h2>
+        <p class="sub">复刻 animatedai.github.io 的体素（voxel）叙事：浅色展台上，左侧<b>输入体</b>由 <span data-v="inN">32</span>×<span data-v="inN">32</span>×<span data-v="inC">3</span> 个灰色体素堆成（深度 <span data-v="inC">3</span> 层 = R/G/B 通道，前面板带淡青色调；真实模型第一层输入为 640×640，此处按全局配置 Global_CFG 演示，计算结构完全一致），四周多出一圈画小一号的浅色<b>虚拟格 = pads 1,1,1,1</b> 在上下左右各扩 <span data-v="pad">1</span> 格（pad 后 <span data-v="PN">34</span>×<span data-v="PN">34</span>）；一个 <b><span data-v="kSize">3</span>×<span data-v="kSize">3</span>×<span data-v="inC">3</span> 白色高亮滑窗</b>以 stride=<span data-v="stride">2</span> 在 pad 后的输入面上跳动扫描，边缘位置正好探入 pad 圈，共 <span data-v="SIDE">16</span>×<span data-v="SIDE">16</span> = <span data-v="PERK">256</span> 个位置（真实模型为 320×320；与真实模型一致：pad 后尺寸为偶数时，最右/最下一圈 pad 不会被 stride 2 的窗口扫到）；中间<b style="color:var(--win)">水平一排、互不重叠</b>地排列 <b style="color:var(--win)"><span data-v="kernels">16</span> 个彩色 <span data-v="kSize">3</span>×<span data-v="kSize">3</span>×<span data-v="inC">3</span> 卷积核</b>（红 → 品红 HSL 渐变，与真实权重 <span class="mono">model.0.conv.weight [16,3,3,3]</span> 一一对应），每个体素的<b>亮度编码真实权重值</b>（正值亮、负值暗）；滑窗每扫过一整行 → 当前卷积核整体脉冲一下 → 右侧<b>黑色线框输出盒</b>（容量 <span data-v="outCap">32</span>×<span data-v="SIDE">16</span>×<span data-v="SIDE">16</span>：沿 x 轴 <span data-v="outCap">32</span> 层 = 真实模型的 32 个输出通道，本演示用 <span data-v="kernels">16</span> 个真实核填前 <span data-v="kernels">16</span> 层）对应位置逐格长出核色体素；一个核扫满 <span data-v="PERK">256</span> 格填完一层，换下一个核填下一层，<span data-v="kernels">16</span> 层填满即止。实际模型中该 Conv 之后还接 Sigmoid+Mul（即 SiLU 激活）。<b>左键拖拽旋转视角，右键/Shift 拖拽平移，滚轮缩放。</b></p>
+        <div id="s5-stage">
+          <div class="s5-tag" id="s5-lbl-in">输入 <b><span data-v="inC">3</span>×<span data-v="inN">32</span>×<span data-v="inN">32</span></b> + pad <span data-v="pad">1</span>（pad 后 <span data-v="PN">34</span>×<span data-v="PN">34</span>）</div>
+          <div class="s5-tag" id="s5-lbl-k">卷积核 <b>3×3×3</b> · 第 1/16 个</div>
+          <div class="s5-tag" id="s5-lbl-out">输出 <b><span data-v="outCap">32</span>×<span data-v="SIDE">16</span>×<span data-v="SIDE">16</span></b> 线框 · 填 <span data-v="kernels">16</span> 层</div>
+          <div id="s5-hint">🖱 左键旋转 · 右键/Shift 平移 · 滚轮缩放</div>
+          <div id="s5-fallback">⚠ 当前环境不支持 WebGL，无法渲染 3D 场景。<br>请参见第 2、4 节的 2D 演示，动画计数仍可正常运行。</div>
+        </div>
+        <div class="count">卷积核 <span class="n" id="s5-kn">1</span> / <span data-v="kernels">16</span> &nbsp;·&nbsp; 窗口位置 <span class="o"
+            id="s5-pos">0</span> / <span data-v="PERK">256</span> &nbsp;·&nbsp; 输出体素 <span class="o" id="s5-cnt">0</span> / <span data-v="TOTAL">4096</span> <span
+            style="color:var(--muted); font-size:12px;">（真实为 32×320×320 = 3,276,800 个输出元素）</span></div>
+        <div class="status">图例：核体素 <b>亮度 ∝ 权重值</b>（正值亮、负值暗；数据来自真实模型 yolo26n 第一层 <span
+            class="mono">model.0.conv.weight</span>，min −22.65 / max +23.60 / std 4.97）· 白色方块 = 当前 <span data-v="kSize">3</span>×<span data-v="kSize">3</span>×<span data-v="inC">3</span> 滑窗（stride <span data-v="stride">2</span>，pads 1,1,1,1）· 输入体四周小一号的浅色格 = pad 虚拟格 · 输出体素颜色 = 产生它的那个卷积核 · 全部 <span data-v="kernels">16</span> 个核各扫 <span data-v="SIDE">16</span>×<span data-v="SIDE">16</span> = <span data-v="PERK">256</span> 个位置，累计 <b><span data-v="kernels">16</span>×<span data-v="PERK">256</span> = <span data-v="TOTAL">4096</span></b> 个输出体素，按行生长（<span data-v="BATCH">16</span> 格/步，共 <span data-v="steps">256</span> 步）</div>
+      </section>
+
+      <!-- ============ 6. 总结 ============ -->
+      <!-- 本节无动画：参数量、计算量（FLOPs）、输出尺寸推导三张卡片 + 该层在 YOLO26 中的作用说明 -->
+      <section id="sec6">
+        <h2>第 6 步：总结 <span class="tag">参数 · 计算量 · 作用</span></h2>
+        <div class="sumgrid">
+          <div class="sumcard">
+            <div class="lab">参数量</div>
+            <div class="eq">权重 <span data-v="outCap">32</span>×<span data-v="inC">3</span>×<span data-v="kSize">3</span>×<span data-v="kSize">3</span> = <span data-v="params1">864</span><br>偏置 + <span data-v="outCap">32</span><br>合计 = <span class="hl" data-v="paramsTotal">896</span> 个参数</div>
+          </div>
+          <div class="sumcard">
+            <div class="lab">计算量（乘 + 加各计 1 次）</div>
+            <div class="eq"><span data-v="SIDE">16</span>×<span data-v="SIDE">16</span>×<span data-v="outCap">32</span> 个输出元素<br>× <span data-v="muls">27</span> 次乘加 × 2<br>≈ <span class="hl" data-v="flops">0.4</span> MFLOPs
+            </div>
+          </div>
+          <div class="sumcard">
+            <div class="lab">输出尺寸推导</div>
+            <div class="eq">⌊(H<sub>in</sub>+2P−K)/S⌋+1<br>= ⌊(<span data-v="inN">32</span>+2×<span data-v="pad">1</span>−<span data-v="kSize">3</span>)/<span data-v="stride">2</span>⌋+1<br>= <span class="hl2" data-v="SIDE">16</span>（输出
+              1×<span data-v="outCap">32</span>×<span data-v="SIDE">16</span>×<span data-v="SIDE">16</span>）</div>
+          </div>
+        </div>
+        <div class="note">
+          <b>这一层在 YOLO26 中的作用：</b>以 stride=<span data-v="stride">2</span> 将 <span data-v="inN">32</span>×<span data-v="inN">32</span> 的 RGB 图像<b>下采样 <span data-v="stride">2</span> 倍</b>到 <span data-v="SIDE">16</span>×<span data-v="SIDE">16</span>，
+          同时用 <span data-v="outCap">32</span> 个 <span data-v="kSize">3</span>×<span data-v="kSize">3</span> 卷积核提取边缘、颜色对比等<b>低级特征</b>，把 <span data-v="inC">3</span> 通道像素信息压缩编码为 <span data-v="outCap">32</span> 通道特征表示，
+          供后续 Backbone 逐层抽象。整个第一层仅需 <span data-v="paramsTotal">896</span> 个参数、约 <span data-v="flops">0.4</span> MFLOPs 计算量（此处为演示配置；真实模型 640×640 时为 896 参数、约 0.18 GFLOPs）。
+        </div>
+      </section>
+    </main>
+  </div>
+
+  <!-- 脚本加载顺序：Three.js 库 → 真实权重数据 CONV_W → 全局配置 Global_CFG → 内联主脚本（依赖前三个全局量） -->
+  <script src="three.min.js"></script>
+  <script src="weights.js"></script>
+  <script src="globalcfg.js"></script>
+  <script>
+    "use strict";
+    /* ================= 工具函数 ================= */
+    const $ = s => document.querySelector(s); // CSS 选择器取单个元素的简写
+    // 创建元素的简写：tag 标签名，cls 类名（可空），txt 文本内容（可空）
+    function el(tag, cls, txt) { const e = document.createElement(tag); if (cls) e.className = cls; if (txt != null) e.textContent = txt; return e; }
+    // mulberry32：小巧的确定性伪随机数生成器，返回 [0,1) 均匀分布
+    function mulberry32(a) { return function () { a |= 0; a = a + 0x6D2B79F5 | 0; let t = Math.imul(a ^ a >>> 15, 1 | a); t = t + Math.imul(t ^ t >>> 7, 61 | t) ^ t; return ((t ^ t >>> 14) >>> 0) / 4294967296; }; }
+    // 固定种子 20260107：保证每次打开页面生成的示意数据完全一致（画面可复现）
+    const rng = mulberry32(20260107);
+    let spare = null; // Box-Muller 一次产生两个正态样本，spare 缓存另一个留给下次用
+    // gauss：Box-Muller 正态分布采样 N(mean, std²)，用于按真实权重分布生成兜底数据
+    function gauss(mean, std) {
+      if (spare !== null) { const v = spare; spare = null; return mean + std * v; }
+      let u = 0; while (u === 0) u = rng(); const v = rng(); // u 不能为 0，否则 log(0) 溢出
+      const m = Math.sqrt(-2 * Math.log(u));
+      spare = m * Math.sin(2 * Math.PI * v);
+      return mean + std * m * Math.cos(2 * Math.PI * v);
+    }
+    const fmt = (x, d = 1) => x.toFixed(d); // 数字格式化简写（默认保留 1 位小数）
+
+    /* ================= 全局统一配置 Global_CFG 在 globalcfg.js 中（<script src="globalcfg.js"> 引入，改它即全页生效）；
+       第 1–5 节的场景尺寸、动画计数、UI 文案数字（<span data-v="...">）全部由它推导 ================= */
+    /* 派生量：输出面边长由卷积公式 ⌊(N+2p−k)/s⌋+1 计算得到 */
+    const outSide = n => Math.floor((n + 2 * Global_CFG.pad - Global_CFG.kSize) / Global_CFG.stride) + 1;
+
+    /* ================= 数据（示意输入 + 按真实分布采样的权重） ================= */
+    // 常用派生量缩写：N=输入面边长，P=pad 圈数，G=pad 后面边长，K=核边长，S=stride，O=输出面边长
+    const N = Global_CFG.inN, P = Global_CFG.pad, G = N + 2 * P, K = Global_CFG.kSize, S = Global_CFG.stride, O = outSide(N); // 输入面 N → pad 后 G → 输出面 O
+    const PAD_CELLS = G * G - N * N; // pad 圈格数
+    const MULS = Global_CFG.inC * K * K; // 单个输出像素的乘加项数
+    /* 2D 网格单元格自适应：N 变大时格子缩小，网格总宽保持 ~440px，避免撑爆布局 */
+    const CELL = Math.max(6, Math.min(20, Math.floor(440 / G)));  // 输入格边长（px）
+    const OCELL = Math.max(6, Math.min(34, Math.floor(200 / O))); // 输出格边长（px）
+    // 把算好的尺寸写进 CSS 变量，.cell/.outcell/.winframe 的样式随配置自动缩放
+    const ROOT_STYLE = document.documentElement.style;
+    ROOT_STYLE.setProperty("--cell", CELL + "px");
+    ROOT_STYLE.setProperty("--ocell", OCELL + "px");
+    ROOT_STYLE.setProperty("--cfz", Math.max(5, Math.min(8.5, CELL * 0.55)) + "px"); // 格内数字字号
+    ROOT_STYLE.setProperty("--winf", (K * CELL + (K - 1) * 2 + 4) + "px"); // 滑窗框 = K 格 + 间隙 + 边框
+    const CHC = ["255,135,135", "140,233,154", "116,192,252"]; // R G B
+    // INPUT[ch][r][c]：3 通道 N×N 示意输入（像素值 25–229 的随机整数）；PADIN：pad 后的 G×G 版本（外圈补 0）
+    const INPUT = [], PADIN = [];
+    for (let ch = 0; ch < 3; ch++) {
+      const a = [], pa = [];
+      // 生成该通道的 N×N 示意像素
+      for (let r = 0; r < N; r++) { const row = []; for (let c = 0; c < N; c++)row.push(Math.floor(25 + rng() * 205)); a.push(row); }
+      // 生成 pad 后的 G×G：内部拷贝原图，外圈填 0
+      for (let r = 0; r < G; r++) {
+        const row = []; for (let c = 0; c < G; c++) {
+          row.push((r >= P && r < P + N && c >= P && c < P + N) ? a[r - P][c - P] : 0);
+        } pa.push(row);
+      }
+      INPUT.push(a); PADIN.push(pa);
+    }
+    const W = []; // [ch][3][3] ~ N(-0.0756, 20.481^2)
+    // 第 2、3 节共用的一个示意卷积核：3 通道 × 3×3，按真实权重统计分布采样
+    for (let ch = 0; ch < 3; ch++) { const sl = []; for (let i = 0; i < K; i++) { const row = []; for (let j = 0; j < K; j++)row.push(gauss(-0.0756, 20.481)); sl.push(row); } W.push(sl); }
+    const BIAS = gauss(0.776, 5.117); // 偏置按真实 bias 统计分布采样
+    function convAt(pr, pc) { // 窗口左上角（pad 后坐标）
+      // 三通道 × K×K 逐元素相乘累加，最后加偏置 —— 即一个输出像素的完整卷积
+      let s = 0; for (let ch = 0; ch < 3; ch++)for (let i = 0; i < K; i++)for (let j = 0; j < K; j++)s += PADIN[ch][pr + i][pc + j] * W[ch][i][j];
+      return s + BIAS;
+    }
+    // 预计算整张输出特征图 OUTV（O×O 拉平成一维），动画只做展示、不重复计算
+    const OUTV = []; for (let r = 0; r < O; r++)for (let c = 0; c < O; c++)OUTV.push(convAt(r * S, c * S));
+
+    let SPEED = 1; // 全局播放速度倍率（由顶部速度滑块改写，各动画的延时都除以它）
+
+    /* ================= 第 1 节：Padding =================
+       各动画节的状态对象约定统一接口：{playing, play, pause, toggle, step, reset}，
+       内部另有 apply()（按当前进度重绘）与 tick()（播放时按 延时/SPEED 自递归 setTimeout 驱动 step）；
+       顶部按钮与「↺ 重播本节」通过 SECS 映射统一调度这套接口 */
+    // i=已生长的 pad 格数；order=pad 格的生长顺序（顺时针）；cells=全部单元格 DOM
+    const s1 = { i: 0, playing: false, t: null, order: [], cells: [] };
+    // buildS1：构建 G×G 网格（中间真实像素带亮度底色，外圈 pad 格初始为收起的 grow 态）
+    (function buildS1() {
+      const grid = $("#s1-grid");
+      grid.style.gridTemplateColumns = `repeat(${G},${CELL}px)`;
+      const pos = [];
+      for (let r = 0; r < G; r++) {
+        s1.cells.push([]);
+        for (let c = 0; c < G; c++) {
+          const isPad = (r === 0 || r === G - 1 || c === 0 || c === G - 1);
+          const cell = el("div", "cell" + (isPad ? " pad grow" : ""), isPad ? "0" : String(PADIN[1][r][c]));
+          if (!isPad) { const v = PADIN[1][r][c]; cell.style.background = `rgba(140,160,200,${0.12 + 0.55 * v / 255})`; cell.style.color = "#dfe6f2"; } // 像素值越大越亮
+          grid.appendChild(cell); s1.cells[r].push(cell);
+          if (isPad) s1.order.push({ cell, r, c });
+        }
+      }
+      // 顺时针排序：上边→右边→下边→左边
+      const ringKey = (r, c) => {
+        if (r === 0) return c;
+        if (c === G - 1) return G + r;
+        if (r === G - 1) return 2 * G - 1 + (G - 1 - c);
+        return 3 * G - 2 + (G - 1 - r);
+      };
+      s1.order.sort((a, b) => ringKey(a.r, a.c) - ringKey(b.r, b.c));
+    })();
+    // apply：前 i 个 pad 格加上 .shown（展开动画），并刷新状态行计数
+    s1.apply = function () {
+      for (let i = 0; i < this.order.length; i++)this.order[i].cell.classList.toggle("shown", i < this.i);
+      $("#s1-status").innerHTML = `已填充 0 值：<b>${this.i}</b> / ${PAD_CELLS}`;
+    };
+    s1.step = function () { if (this.i < PAD_CELLS) { this.i++; this.apply(); } else this.pause(); };
+    s1.tick = function () { this.step(); if (this.playing && this.i < PAD_CELLS) this.t = setTimeout(() => this.tick(), 55 / SPEED); };
+    s1.play = function () { if (this.playing) return; if (this.i >= PAD_CELLS) this.reset(); this.playing = true; this.tick(); updatePlayBtn(); };
+    s1.pause = function () { this.playing = false; clearTimeout(this.t); updatePlayBtn(); };
+    s1.toggle = function () { this.playing ? this.pause() : this.play(); };
+    s1.reset = function () { this.pause(); this.i = 0; this.apply(); };
+
+    /* ================= 第 2 节：滑窗卷积 ================= */
+    // pos=已完成的窗口位置数（0..O*O）；chCells=三通道网格 DOM；outCells=输出网格 DOM
+    const s2 = { pos: 0, playing: false, t: null, chCells: [[], [], []], outCells: [] };
+    // buildS2：构建 R/G/B 三个 pad 后网格（格底色随像素值变亮，色调用各通道色）+ O×O 输出网格
+    (function buildS2() {
+      for (let ch = 0; ch < 3; ch++) {
+        const grid = $("#s2-g" + ch);
+        grid.style.gridTemplateColumns = `repeat(${G},${CELL}px)`;
+        for (let r = 0; r < G; r++) {
+          s2.chCells[ch].push([]);
+          for (let c = 0; c < G; c++) {
+            const v = PADIN[ch][r][c];
+            const isPad = (r === 0 || r === G - 1 || c === 0 || c === G - 1);
+            const cell = el("div", "cell" + (isPad ? " pad" : ""), String(v));
+            if (!isPad) cell.style.background = `rgba(${CHC[ch]},${0.10 + 0.55 * v / 255})`;
+            grid.appendChild(cell); s2.chCells[ch][r].push(cell);
+          }
+        }
+      }
+      const og = $("#s2-out");
+      og.style.gridTemplateColumns = `repeat(${O},${OCELL}px)`;
+      for (let i = 0; i < O * O; i++) { const cell = el("div", "outcell", "·"); og.appendChild(cell); s2.outCells.push(cell); }
+    })();
+    // moveFrames：把三个通道上的滑窗高亮框平移到 pad 后坐标 (pr,pc)
+    function moveFrames(pr, pc) {
+      for (let ch = 0; ch < 3; ch++) {
+        const f = $("#s2-f" + ch), g = $("#s2-g" + ch);
+        f.classList.add("on");
+        // 锚定到网格左上角（gridwrap 含标题，需用 offsetTop 校正），窗口边框向外扩 2px
+        f.style.top = (g.offsetTop - 2) + "px";
+        f.style.left = (g.offsetLeft - 2) + "px";
+        f.style.transform = `translate(${pc * (CELL + 2)}px,${pr * (CELL + 2)}px)`;
+      }
+    }
+    // renderDetail：渲染当前窗口的计算详情（每通道：输入补丁 ⊙ 核切片 → 部分和）；idx<0 时清空
+    function renderDetail(idx, pr, pc, ps) {
+      const box = $("#s2-detail");
+      if (idx < 0) { box.innerHTML = ""; return; }
+      let html = "";
+      const names = ["R", "G", "B"];
+      for (let ch = 0; ch < 3; ch++) {
+        html += `<div class="chblock"><div class="chname ${names[ch]}">${names[ch]}</div>`;
+        html += `<div><div class="glabel">输入补丁 x（${K}×${K}）</div><div class="mini" style="grid-template-columns:repeat(${K},46px)">`;
+        for (let i = 0; i < K; i++)for (let j = 0; j < K; j++) {
+          const v = PADIN[ch][pr + i][pc + j];
+          const pad = (pr + i === 0 || pr + i === G - 1 || pc + j === 0 || pc + j === G - 1);
+          html += `<div class="mcell${pad ? " pad" : ""}">${v}</div>`;
+        }
+        html += `</div></div><div class="op">⊙</div>`;
+        html += `<div><div class="glabel">核切片 w（${names[ch]}）</div><div class="mini" style="grid-template-columns:repeat(${K},46px)">`;
+        for (let i = 0; i < K; i++)for (let j = 0; j < K; j++)html += `<div class="mcell w">${fmt(W[ch][i][j], 1)}</div>`;
+        html += `</div></div><div class="op">→</div>`;
+        html += `<div class="partial"><span class="lab">Σ ${K * K} 项乘积</span><span class="val">${fmt(ps[ch], 1)}</span></div></div>`;
+      }
+      box.innerHTML = html;
+    }
+    // s2.apply：按当前 pos 重绘——前 pos 个输出格填入预计算值 OUTV，刚算出的那格加 hot 高亮，
+    // 滑窗框移到对应位置，公式栏与状态行同步更新，并重绘详情区
+    s2.apply = function () {
+      const k = this.pos;
+      for (let i = 0; i < O * O; i++) {
+        const cell = this.outCells[i];
+        cell.classList.toggle("filled", i < k);
+        cell.classList.remove("hot");
+        if (i < k) cell.textContent = fmt(OUTV[i], 0);
+        else cell.textContent = "·";
+      }
+      if (k === 0) { // 初始态：窗口归位、提示语、清空详情
+        moveFrames(0, 0);
+        $("#s2-formula").innerHTML = `y[r,c] = Σ<sub>${MULS}</sub>( xᵢ · wᵢ ) + b <span class="m">— 点击「播放」或「单步」开始滑窗</span>`;
+        renderDetail(-1);
+        $("#s2-status").innerHTML = `位置 <b>0</b> / ${O * O} · 窗口左上角 (r,c) = (0,0)，每次跳 ${S} 格`;
+        return;
+      }
+      const idx = k - 1, r = Math.floor(idx / O), c = idx % O, pr = r * S, pc = c * S; // 输出坐标 → pad 后窗口左上角
+      moveFrames(pr, pc);
+      const cell = this.outCells[idx];
+      cell.classList.add("filled", "hot");
+      cell.textContent = fmt(OUTV[idx], 0);
+      const ps = []; for (let ch = 0; ch < 3; ch++) { let s = 0; for (let i = 0; i < K; i++)for (let j = 0; j < K; j++)s += PADIN[ch][pr + i][pc + j] * W[ch][i][j]; ps.push(s); } // 各通道部分和
+      $("#s2-formula").innerHTML =
+        `y[<span class="n">${r}</span>,<span class="n">${c}</span>] = Σ(x·w) + b = ` +
+        `<span style="color:var(--R)">${fmt(ps[0])}</span> + <span style="color:var(--G)">${fmt(ps[1])}</span> + <span style="color:var(--B)">${fmt(ps[2])}</span> + <span class="b">${fmt(BIAS, 2)}</span> = <span class="y">${fmt(OUTV[idx], 1)}</span>`;
+      $("#s2-status").innerHTML = `位置 <b>${k}</b> / ${O * O} · 输出 (r,c)=(${r},${c}) · 窗口左上角 (${pr},${pc})，stride=${S}`;
+      renderDetail(idx, pr, pc, ps);
+    };
+    s2.step = function () { if (this.pos < O * O) { this.pos++; this.apply(); } else this.pause(); };
+    s2.tick = function () { this.step(); if (this.playing && this.pos < O * O) this.t = setTimeout(() => this.tick(), 1050 / SPEED); };
+    s2.play = function () { if (this.playing) return; if (this.pos >= O * O) this.reset(); this.playing = true; this.tick(); updatePlayBtn(); };
+    s2.pause = function () { this.playing = false; clearTimeout(this.t); updatePlayBtn(); };
+    s2.toggle = function () { this.playing ? this.pause() : this.play(); };
+    s2.reset = function () { this.pause(); this.pos = 0; this.apply(); };
+    s2.apply();
+
+    /* ================= 第 3 节：真实数值特写 ================= */
+    // idx=已揭示的乘积项数；rows=27 个乘积行 DOM；psums=各通道部分和；pr/pc=特写窗口左上角（对应输出 y[1,2]）
+    const s3 = { idx: 0, playing: false, t: null, rows: [], lines: [], sum: 0, psums: [0, 0, 0], pr: 2, pc: 4, pvals: [] };
+    // buildS3：预生成 27 项乘积行（3 列 × 9 项），同时累加总和与各通道部分和
+    (function buildS3() {
+      const plist = $("#s3-plist");
+      const names = ["R", "G", "B"];
+      const cols = ["var(--R)", "var(--G)", "var(--B)"];
+      for (let ch = 0; ch < 3; ch++) {
+        const col = el("div", "pcol");
+        col.innerHTML = `<h4 style="color:${cols[ch]}">通道 ${names[ch]} · 9 项乘积</h4>`;
+        for (let i = 0; i < K; i++)for (let j = 0; j < K; j++) {
+          const x = PADIN[ch][s3.pr + i][s3.pc + j], w = W[ch][i][j], p = x * w;
+          s3.sum += p; s3.psums[ch] += p; s3.pvals.push(p);
+          const row = el("div", "prow");
+          row.innerHTML = `<span>x<sub>${s3.pr + i},${s3.pc + j}</sub>·w<sub>${i},${j}</sub> = ${x} × ${fmt(w, 2)}</span><span class="pv">${fmt(p, 1)}</span>`;
+          col.appendChild(row); s3.rows.push(row);
+        }
+        plist.appendChild(col);
+      }
+    })();
+    // s3.apply：逐项揭示逻辑——前 idx 个乘积行加 .on 滑入；未揭示完时显示当前部分和，
+    // 全部 27 项揭示后依次浮现三行汇总（部分和 → 加偏置 → 最终结果）
+    s3.apply = function () {
+      this.rows.forEach((r, i) => r.classList.toggle("on", i < this.idx));
+      const n = this.idx;
+      const done = n >= MULS;
+      if (!done) {
+        let run = 0; for (let i = 0; i < n; i++)run += this.pvals[i];
+        $("#s3-formula").innerHTML = `y[1,2] = Σ<sub>${MULS}</sub>( x · w ) + b <span class="m">— 已揭示 ${n}/${MULS} 项，当前部分和 Σ = </span><span class="n">${fmt(run, 1)}</span>`;
+        this.lines.forEach(l => l.classList.remove("on"));
+        return;
+      }
+      $("#s3-formula").innerHTML = `y[1,2] = Σ<sub>${MULS}</sub>( x · w ) + b <span class="m">— ${MULS} 项全部完成</span>`;
+      const [pR, pG, pB] = this.psums;
+      const L1 = $("#s3-line1"), L2 = $("#s3-line2"), L3 = $("#s3-line3");
+      L1.innerHTML = `各通道部分和：<span style="color:var(--R)">Σ_R = ${fmt(pR, 1)}</span> ＋ <span style="color:var(--G)">Σ_G = ${fmt(pG, 1)}</span> ＋ <span style="color:var(--B)">Σ_B = ${fmt(pB, 1)}</span> = <span class="n">${fmt(this.sum, 1)}</span>`;
+      L2.innerHTML = `加偏置：${fmt(this.sum, 1)} + b(<span class="b">${fmt(BIAS, 2)}</span>) = <span class="y">${fmt(this.sum + BIAS, 1)}</span>`;
+      L3.innerHTML = `⇒ 输出 y[1,2] = <span class="y">${fmt(this.sum + BIAS, 1)}</span> <span class="m">（权重 ~ N(-0.076, 20.48²) 采样，与真实权重统计一致；该值即写入输出特征图 (1,2) 处）</span>`;
+      [L1, L2, L3].forEach((l, i) => setTimeout(() => l.classList.add("on"), i * 350 / SPEED));
+    };
+    s3.step = function () { if (this.idx < MULS) { this.idx++; this.apply(); } else this.pause(); };
+    s3.tick = function () { this.step(); if (this.playing && this.idx < MULS) this.t = setTimeout(() => this.tick(), 320 / SPEED); };
+    s3.play = function () { if (this.playing) return; if (this.idx >= MULS) this.reset(); this.playing = true; this.tick(); updatePlayBtn(); };
+    s3.pause = function () { this.playing = false; clearTimeout(this.t); updatePlayBtn(); };
+    s3.toggle = function () { this.playing ? this.pause() : this.play(); };
+    s3.reset = function () { this.pause(); this.idx = 0; this.apply(); };
+    s3.lines = [$("#s3-line1"), $("#s3-line2"), $("#s3-line3")];
+    s3.apply();
+
+    /* ================= 第 4 节：32 个卷积核 ================= */
+    // n=已生成的卷积核数（= 已堆叠的特征图数）
+    const s4 = { n: 0, playing: false, t: null };
+    const cv = $("#stackCanvas"), ctx = cv.getContext("2d");
+    // drawSlice：画第 i 张特征图「薄片」——用斜切平行四边形模拟 3D 堆叠透视；
+    // 每片沿 (dx,dy) 依次向右上偏移，最新一片（hot）高亮并标注编号
+    function drawSlice(i, total) {
+      const x0 = 300, y0 = 258, dx = 6.2, dy = -5.9; // 首片位置 + 每片偏移量
+      const x = x0 + i * dx, y = y0 + i * dy;
+      const a = [128, 22], b = [-64, 30]; // 平行四边形的两条边向量（透视斜切）
+      const P0 = [x, y], P1 = [x + a[0], y + a[1]], P2 = [x + a[0] + b[0], y + a[1] + b[1]], P3 = [x + b[0], y + b[1]];
+      const hot = (i === total - 1);
+      ctx.beginPath();
+      ctx.moveTo(P0[0], P0[1]); ctx.lineTo(P1[0], P1[1]); ctx.lineTo(P2[0], P2[1]); ctx.lineTo(P3[0], P3[1]); ctx.closePath();
+      ctx.fillStyle = hot ? "rgba(61,218,215,0.38)" : "rgba(61,218,215,0.10)";
+      ctx.fill();
+      ctx.strokeStyle = hot ? "#3ddad7" : "rgba(61,218,215,0.5)";
+      ctx.lineWidth = hot ? 2 : 1;
+      ctx.stroke();
+      if (hot) { // 最新一片右上角标注「特征图 #i (O×O)」
+        ctx.fillStyle = "#3ddad7";
+        ctx.font = "bold 13px ui-monospace,Menlo,monospace";
+        ctx.textAlign = "right";
+        ctx.fillText(`特征图 #${i}  (${O}×${O})`, cv.width - 12, P1[1] + 4);
+        ctx.textAlign = "left";
+      }
+    }
+    // s4.draw：清空重画全部已堆叠薄片 + 更新计数器
+    s4.draw = function () {
+      ctx.clearRect(0, 0, cv.width, cv.height);
+      ctx.fillStyle = "#8b949e"; ctx.font = "12px ui-monospace,Menlo,monospace";
+      ctx.fillText(`输出张量 1×${Global_CFG.outCap}×${O}×${O}（通道维堆叠，伪 3D）`, 16, 22);
+      for (let i = 0; i < this.n; i++)drawSlice(i, this.n);
+      $("#s4-kn").textContent = this.n;
+      $("#s4-cn").textContent = this.n;
+    };
+    s4.step = function () { if (this.n < Global_CFG.outCap) { this.n++; this.draw(); } else this.pause(); };
+    s4.tick = function () { this.step(); if (this.playing && this.n < Global_CFG.outCap) this.t = setTimeout(() => this.tick(), 260 / SPEED); };
+    s4.play = function () { if (this.playing) return; if (this.n >= Global_CFG.outCap) this.reset(); this.playing = true; this.tick(); updatePlayBtn(); };
+    s4.pause = function () { this.playing = false; clearTimeout(this.t); updatePlayBtn(); };
+    s4.toggle = function () { this.playing ? this.pause() : this.play(); };
+    s4.reset = function () { this.pause(); this.n = 0; this.draw(); };
+    s4.draw();
+
+    /* ================= 第 5 节：3D 全景演示 · 体素方块风格（Three.js） ================= */
+    // pos=已完成窗口位置总数（0..S5_TOTAL）；ready=WebGL 初始化是否成功
+    const s5 = { pos: 0, playing: false, t: null, ready: false };
+    /* ---- 配置见 globalcfg.js 的 Global_CFG；2D/3D 共用同一组派生量（N/G/O，见上方数据区） ---- */
+    const S5_PN = G;   // pad 后输入面
+    const S5_SIDE = O; // 输出面边长
+    const S5_PER_KERNEL = S5_SIDE * S5_SIDE;                   // 每核窗口位置数
+    const S5_TOTAL = Global_CFG.kernels * S5_PER_KERNEL;       // 输出体素总数
+    const S5_BATCH = S5_SIDE;                                  // 每步长出一整行
+    // 两个「延迟绑定」的函数：initS5 内部赋值，WebGL 不可用时保持空函数，计数动画仍可用
+    let s5ApplyStep = function () { }, s5ResetScene = function () { };
+    // 刷新 HUD 计数（第 k 个核 / 窗口位置 / 已产出体素数）与卷积核标注文字
+    function s5UpdateHUD() {
+      const done = s5.pos;
+      const k = Math.min(Math.floor(done / S5_PER_KERNEL) + 1, Global_CFG.kernels);
+      const p = (done >= S5_TOTAL) ? S5_PER_KERNEL : done % S5_PER_KERNEL;
+      $("#s5-kn").textContent = k;
+      $("#s5-pos").textContent = p;
+      $("#s5-cnt").textContent = done;
+      $("#s5-lbl-k").innerHTML = `卷积核 <b>${Global_CFG.kSize}×${Global_CFG.kSize}×${Global_CFG.inC}</b> · 第 ${k}/${Global_CFG.kernels} 个`;
+    }
+    // 一步 = 滑窗扫过一整行（S5_BATCH 个窗口位置），逐位置推进并通知 3D 场景
+    s5.step = function () {
+      if (this.pos >= S5_TOTAL) { this.pause(); return; }
+      let k = 0, r = 0, c = 0;
+      for (let b = 0; b < S5_BATCH && this.pos < S5_TOTAL; b++) { // 一步 = 滑窗扫过一整行（S5_BATCH 个位置）
+        k = Math.floor(this.pos / S5_PER_KERNEL);
+        const i = this.pos % S5_PER_KERNEL;
+        r = Math.floor(i / S5_SIDE); c = i % S5_SIDE;
+        this.pos++;
+        s5ApplyStep(k, r, c, b === S5_BATCH - 1 || this.pos >= S5_TOTAL); // 行末才换行/脉冲卷积核
+      }
+      s5UpdateHUD();
+    };
+    s5.tick = function () { this.step(); if (this.playing && this.pos < S5_TOTAL) this.t = setTimeout(() => this.tick(), 110 / SPEED); };
+    s5.play = function () { if (this.playing) return; if (this.pos >= S5_TOTAL) this.reset(); this.playing = true; this.tick(); updatePlayBtn(); };
+    s5.pause = function () { this.playing = false; clearTimeout(this.t); updatePlayBtn(); };
+    s5.toggle = function () { this.playing ? this.pause() : this.play(); };
+    s5.reset = function () { this.pause(); this.pos = 0; s5ResetScene(); s5UpdateHUD(); };
+
+    // initS5：Three.js 场景初始化（渲染器/相机/灯光/地面/体素/动画循环），整体是个立即执行函数
+    (function initS5() {
+      const stage = $("#s5-stage");
+      let renderer = null;
+      try {
+        // WebGL 能力探测：库缺失或拿不到 webgl 上下文都视为不可用
+        if (typeof THREE === "undefined" || !window.WebGLRenderingContext) throw new Error("no THREE/WebGL");
+        const probe = document.createElement("canvas");
+        if (!(probe.getContext("webgl") || probe.getContext("experimental-webgl"))) throw new Error("no context");
+        renderer = new THREE.WebGLRenderer({ antialias: true });
+      } catch (e) {
+        stage.classList.add("nogl"); // 优雅降级：显示提示文字，计数动画仍可用
+        return;
+      }
+      s5.ready = true;
+      const H5 = 560;
+      let W5 = stage.clientWidth || 900;
+      renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2)); // 高分屏最多 2x，兼顾清晰度与帧率
+      renderer.setSize(W5, H5);
+      renderer.setClearColor(0xeceff1, 1); // 浅色展台背景
+      stage.insertBefore(renderer.domElement, stage.firstChild);
+      const scene = new THREE.Scene();
+      scene.fog = new THREE.Fog(0xeceff1, 340, 820); // 距离雾，远处体素淡出（后面按场景跨度再调整）
+      const camera = new THREE.PerspectiveCamera(42, W5 / H5, 0.1, 2000);
+      scene.add(new THREE.AmbientLight(0xffffff, 0.62)); // 环境光打底
+      const dl = new THREE.DirectionalLight(0xffffff, 0.85); // 柔和俯视平行光（场景跨度 ~300、体素超 10 万，关阴影保帧率）
+      dl.position.set(120, 220, 160); scene.add(dl);
+      const dl2 = new THREE.DirectionalLight(0xdfe8ff, 0.22); // 冷色补光，拉开体素各面亮度差
+      dl2.position.set(-160, 60, -120); scene.add(dl2);
+      const ground = new THREE.Mesh(new THREE.PlaneGeometry(1400, 1400), new THREE.MeshBasicMaterial({ color: 0xe3e8ec }));
+      ground.rotation.x = -Math.PI / 2; ground.position.y = -68; scene.add(ground); // 地面展板（位置后面再按尺寸调）
+
+      const V = Global_CFG.V, PN = S5_PN, SIDE = S5_SIDE; // 体素留缝 / pad 后输入面 / 输出面边长（均由 Global_CFG 推导）
+      const boxGeo = new THREE.BoxGeometry(1, 1, 1); // 所有体素共用一个单位立方体几何
+      const _m = new THREE.Matrix4(), _c = new THREE.Color(); // 复用的临时矩阵/颜色，避免循环里反复分配
+      // setInst：写 InstancedMesh 第 idx 个实例的变换（位置 + 缩放 s）
+      function setInst(mesh, idx, x, y, z, s) { _m.makeScale(s, s, s); _m.setPosition(x, y, z); mesh.setMatrixAt(idx, _m); }
+      // voxelMat：体素统一材质（白色基底 + flatShading，实际颜色靠 instanceColor 逐实例着色）
+      function voxelMat(sh) { return new THREE.MeshPhongMaterial({ color: 0xffffff, flatShading: true, shininess: sh || 8 }); }
+
+      /* ---- 真实权重（weights.js · CONV_W [16,3,3,3]）；缺失时按真实分布采样兜底 ---- */
+      const RW = (typeof CONV_W !== "undefined" && CONV_W.length >= Global_CFG.kernels) ? CONV_W : null;
+      // weightAt：权重取值入口——优先真实权重，缺失时按真实分布 N(-0.0755, 4.966²) 采样
+      function weightAt(k, ch, i, j) { return RW ? RW[k][ch][i][j] : gauss(-0.0755, 4.966); }
+      function kernHue(k) { return (k / (Global_CFG.kernels - 1)) * 300 / 360; } // 红(0°) → 品红(300°)
+
+      /* ---- 布局：各模块位置按尺寸自动排布（输入体 → 核排 → 输出盒，净间距 layout.gap），间距/方向/旋转都在 Global_CFG.layout 改 ---- */
+      const L = Global_CFG.layout;
+      const kFrom = new THREE.Vector3(...L.origin);           // 第 1 个卷积核的锚点
+      const kDir = new THREE.Vector3(...L.kernDir).normalize(); // 核排延伸方向（单位向量）
+      const kPitch = Global_CFG.kSize + L.kernGap; // 核心距 > 核宽 → 互不重叠
+      const flow2world = v => v.applyAxisAngle(new THREE.Vector3(0, 0, 1), L.flowRotZ); // 核排/输出盒局部坐标 → 世界（绕 Z 旋转）
+
+      /* ---- 输入体：inN×inN×inC 体素。灰色外壳，前面板淡青（仿 GIF 的灰+青）。
+             pads 1,1,1,1 → 上下左右各扩 pad 格浅色小一号虚拟 pad 格（尺寸均由 Global_CFG 推导） ---- */
+      const inA = new THREE.Vector3(...L.inputFace).normalize();            // 深度轴单位向量（可配置）
+      const inU = new THREE.Vector3(0, 1, 0).cross(inA);                      // 输入面内「右」方向
+      const inVv = new THREE.Vector3().crossVectors(inA, inU);               // 输入面内「上」方向
+      const inHalfX = (Math.abs(inU.x) + Math.abs(inVv.x)) * (PN - 1) / 2 + Math.abs(inA.x) * (Global_CFG.inC - 1) / 2 + 0.5; // 输入体在 x 方向的半宽
+      const inPos = new THREE.Vector3(kFrom.x - Global_CFG.kSize / 2 - L.gap - inHalfX, kFrom.y, kFrom.z); // 输入体右缘距第 1 个核 gap
+      const _p = new THREE.Vector3();
+      function inGridPos(row, col, d) { // pad 后格点 (行,列,层) → 世界坐标（共享 _p 返回，调用方需立即使用/拷贝）
+        return _p.copy(inPos).addScaledVector(inU, col - (PN - 1) / 2).addScaledVector(inVv, (PN - 1) / 2 - row).addScaledVector(inA, d - (Global_CFG.inC - 1) / 2);
+      }
+      // 输入体体素：PN×PN×inC 个实例一次画完（InstancedMesh，一次 draw call）
+      const inMesh = new THREE.InstancedMesh(boxGeo, voxelMat(6), PN * PN * Global_CFG.inC);
+      {
+        let n = 0;
+        for (let d = 0; d < Global_CFG.inC; d++)for (let r = 0; r < PN; r++)for (let c = 0; c < PN; c++) {
+          inGridPos(r, c, d);
+          const isPad = (r < Global_CFG.pad || r >= PN - Global_CFG.pad || c < Global_CFG.pad || c >= PN - Global_CFG.pad);
+          setInst(inMesh, n, _p.x, _p.y, _p.z, isPad ? V * 0.55 : V);       // pad 虚拟格画小一号，示意为「扩充」
+          if (isPad) _c.setHSL(0.55, 0.16, 0.80 + rng() * 0.05);         // pad 圈：浅蓝灰
+          else if (d === Global_CFG.inC - 1) _c.setHSL(0.47, 0.26, 0.62 + rng() * 0.08); // 前面板淡青
+          else _c.setHSL(0.58, 0.045, 0.66 + rng() * 0.09 - d * 0.04);     // 中性灰，逐格微差
+          inMesh.setColorAt(n, _c);
+          n++;
+        }
+        inMesh.instanceMatrix.needsUpdate = true;
+        if (inMesh.instanceColor) inMesh.instanceColor.needsUpdate = true;
+      }
+      scene.add(inMesh);
+
+      /* ---- 核排 + 输出盒放入 flowGroup：整体可相对输入体绕 Z 轴旋转（layout.flowRotZ，如 Math.PI/2 = 90°） ---- */
+      const flowGroup = new THREE.Group();
+      flowGroup.rotation.z = L.flowRotZ;
+      scene.add(flowGroup);
+
+      /* ---- 卷积核阵列：kSize×kSize×inC 体素积木水平排列成一排、互不重叠（锚点/方向/间距见 Global_CFG.layout）；体素亮度 ∝ 真实权重值（正亮负暗） ---- */
+      function kernBase(k) { return new THREE.Vector3().copy(kFrom).addScaledVector(kDir, k * kPitch); }
+      const kernGroups = [];
+      for (let k = 0; k < Global_CFG.kernels; k++) {
+        const hue = kernHue(k);
+        const mat = new THREE.MeshPhongMaterial({
+          color: 0xffffff, flatShading: true, shininess: 14,
+          emissive: new THREE.Color().setHSL(hue, 0.75, 0.5), emissiveIntensity: 0
+        });
+        const im = new THREE.InstancedMesh(boxGeo, mat, 27);
+        let n = 0;
+        for (let ch = 0; ch < 3; ch++)for (let i = 0; i < 3; i++)for (let j = 0; j < 3; j++) {
+          setInst(im, n, j - 1, 1 - i, ch - 1, V);
+          const w = weightAt(k, ch, i, j);
+          const l = Math.min(0.88, Math.max(0.14, 0.55 + 0.32 * Math.tanh(w / 8))); // 亮度 ∝ 权重值
+          im.setColorAt(n, _c.setHSL(hue, 0.72, l));
+          n++;
+        }
+        im.instanceMatrix.needsUpdate = true;
+        if (im.instanceColor) im.instanceColor.needsUpdate = true;
+        const g = new THREE.Group(); g.add(im); g.position.copy(kernBase(k));
+        g.userData = { mat: mat, baseY: g.position.y, pulseT: -1e9 };
+        flowGroup.add(g); kernGroups.push(g);
+      }
+      let curK = 0; // 当前正在工作的卷积核序号（渲染循环据此做抬起/发光高亮）
+
+      /* ---- 白色滑窗：3×3×3 半透明白体素 + 深色亮描边，stride=2 在 pad 后输入面上跳动扫描（边缘位置探入 pad 圈） ---- */
+      const winMat = new THREE.MeshPhongMaterial({
+        color: 0xffffff, emissive: 0xffffff, emissiveIntensity: 0.4,
+        flatShading: true, shininess: 40, transparent: true, opacity: 0.92, depthWrite: false
+      });
+      const winMesh = new THREE.InstancedMesh(boxGeo, winMat, 27);
+      { let n = 0; for (let d = 0; d < 3; d++)for (let i = 0; i < 3; i++)for (let j = 0; j < 3; j++)setInst(winMesh, n++, j - 1, 1 - i, d - 1, V); winMesh.instanceMatrix.needsUpdate = true; }
+      const winFrame = new THREE.LineSegments(
+        new THREE.EdgesGeometry(new THREE.BoxGeometry(3.06, 3.06, 3.06)),
+        new THREE.LineBasicMaterial({ color: 0x4a545e }));
+      const winGroup = new THREE.Group(); winGroup.add(winMesh); winGroup.add(winFrame); scene.add(winGroup);
+      function winTargetPos(r, c) { // 输出格 (r,c) ↔ 滑窗左上角落在 pad 后格点 (r·stride, c·stride)，窗口中心再 +1 格
+        return new THREE.Vector3().copy(inGridPos(r * Global_CFG.stride + (Global_CFG.kSize - 1) / 2, c * Global_CFG.stride + (Global_CFG.kSize - 1) / 2, (Global_CFG.inC - 1) / 2));
+      }
+      const winTarget = winTargetPos(0, 0);
+      winGroup.position.copy(winTarget);
+
+      /* ---- 输出体：boxCap×SIDE×SIDE 容量的黑色细线框空盒（沿 x 轴分层 = 输出通道，boxCap = max(outCap, kernels) 防溢出，本演示填前 kernels 层），逐格长出核色体素。
+             尺寸由卷积公式算得，位置接在核阵列末端之后（净间距 layout.gap） ---- */
+      const boxCap = Math.max(Global_CFG.outCap, Global_CFG.kernels);
+      const OUT_X0 = kernBase(Global_CFG.kernels - 1).x + Global_CFG.kSize / 2 + L.gap + 0.5; // 第 1 层（k=0）的 x
+      const outMesh = new THREE.InstancedMesh(boxGeo, voxelMat(10), S5_TOTAL);
+      const outPos = [];
+      {
+        let n = 0;
+        for (let k = 0; k < Global_CFG.kernels; k++)for (let r = 0; r < SIDE; r++)for (let c = 0; c < SIDE; c++) {
+          const x = OUT_X0 + k, y = (SIDE - 1) / 2 - r, z = c - (SIDE - 1) / 2;
+          outPos.push([x, y, z]);
+          setInst(outMesh, n, x, y, z, 0.0001); // 尚未长出
+          outMesh.setColorAt(n, _c.setHSL(kernHue(k), 0.72, 0.55));
+          n++;
+        }
+        outMesh.instanceMatrix.needsUpdate = true;
+        if (outMesh.instanceColor) outMesh.instanceColor.needsUpdate = true;
+      }
+      flowGroup.add(outMesh);
+      const wire = new THREE.LineSegments(
+        new THREE.EdgesGeometry(new THREE.BoxGeometry(boxCap, SIDE, SIDE)),
+        new THREE.LineBasicMaterial({ color: 0x22282e }));
+      wire.position.set(OUT_X0 + (boxCap - 1) / 2, 0, 0); flowGroup.add(wire);
+      const pops = []; // 长出动画 {idx,t0}
+      // easeOutBack 回弹缓动：体素长出时先冲过目标尺寸再回落，Q 弹感
+      const easeOutBack = s => { const c1 = 1.70158, c3 = c1 + 1; return 1 + c3 * Math.pow(s - 1, 3) + c1 * Math.pow(s - 1, 2); };
+
+      /* ---- 步进 / 重置：一步 = 一整行（S5_BATCH 格）。滑窗在一个步进周期内从该行左到右连续扫描
+             （渲染循环按时间插值），输出体素按列错开长出、跟着滑窗走；行末脉冲当前核 ---- */
+      // winRow=当前扫描行；sweepT0=本行扫描起始时刻；sweeping=是否正在行内连续扫描
+      let winRow = 0, sweepT0 = 0, sweeping = false;
+      // s5ApplyStep：步进回调（由 s5.step 调用）。每格往 pops 里排一个按列错开的长出动画；
+      // last=行末格时切到下一行并开始新一轮扫描 + 脉冲当前核
+      s5ApplyStep = function (k, r, c, last) {
+        if (last) {
+          winRow = r; sweepT0 = performance.now(); sweeping = true; // 开始扫新一行
+          curK = k;
+          kernGroups[k].userData.pulseT = performance.now(); // 当前核脉冲（放大 + 上移 + 发光，再回落）
+        }
+        pops.push({ idx: k * S5_PER_KERNEL + r * SIDE + c, t0: performance.now() + (c / (SIDE - 1)) * (110 / SPEED) }); // 按列错开长出
+      };
+      // s5ResetScene：场景复位——滑窗归位、视角恢复到初始快照 cam0、核排状态清零、输出体素全部缩回
+      s5ResetScene = function () {
+        curK = 0; winRow = 0; sweeping = false;
+        winTarget.copy(winTargetPos(0, 0)); winGroup.position.copy(winTarget);
+        cam.theta = cam0.theta; cam.phi = cam0.phi; cam.r = cam0.r; lookAt.copy(cam0.lookAt); camUpdate(); // 视角一并复位
+        kernGroups.forEach(g => { g.userData.pulseT = -1e9; g.userData.act = 0; g.scale.setScalar(1); g.position.y = g.userData.baseY; g.userData.mat.emissiveIntensity = 0; });
+        pops.length = 0;
+        for (let i = 0; i < S5_TOTAL; i++)setInst(outMesh, i, outPos[i][0], outPos[i][1], outPos[i][2], 0.0001);
+        outMesh.instanceMatrix.needsUpdate = true;
+      };
+      /* ---- 简易轨道相机：左键拖拽旋转 + 右键/Shift 拖拽平移 + 滚轮缩放（限制俯仰角） ---- */
+      const outCenter = flow2world(new THREE.Vector3(OUT_X0 + (boxCap - 1) / 2, 0, 0)); // 输出盒中心（世界坐标）
+      const span = inPos.distanceTo(outCenter) + PN / 2 + SIDE / 2; // 场景跨度
+      const cam = { theta: L.camTheta, phi: L.camPhi, r: span * 1.25 }; // 初始斜上方视角（仿 GIF），距离按跨度自动
+      const lookAt = new THREE.Vector3().addVectors(inPos, outCenter).multiplyScalar(0.5); // 注视点 = 输入体与输出盒的中点
+      const cam0 = { theta: cam.theta, phi: cam.phi, r: cam.r, lookAt: lookAt.clone() }; // 初始视角快照，重置时恢复
+      scene.fog.near = span * 1.2; scene.fog.far = span * 3.2; // 雾随场景跨度
+      ground.position.y = -Math.max(PN, SIDE) / 2 - 4;
+      const refGrid = new THREE.GridHelper(span * 4, Math.max(10, Math.round(span)), 0xc9d2dc, 0xdde4ec); // 浅色参考网格（美化）
+      refGrid.position.y = ground.position.y + 0.05; scene.add(refGrid);
+      // camUpdate：由球坐标 (theta 方位角, phi 极角, r 距离) 计算相机位置并看向 lookAt
+      function camUpdate() {
+        const sp = Math.sin(cam.phi);
+        camera.position.set(lookAt.x + cam.r * sp * Math.sin(cam.theta), lookAt.y + cam.r * Math.cos(cam.phi), lookAt.z + cam.r * sp * Math.cos(cam.theta));
+        camera.lookAt(lookAt);
+      }
+      camUpdate();
+      let dragging = false, panning = false, lx = 0, ly = 0; // 拖拽状态：panning 区分旋转/平移；lx,ly=上一帧指针位置
+      stage.addEventListener("contextmenu", e => e.preventDefault()); // 右键用于平移，屏蔽系统菜单
+      // 按下：左键=旋转，右键或 Shift+左键=平移；setPointerCapture 保证拖出舞台也能继续跟踪
+      stage.addEventListener("pointerdown", e => { dragging = true; panning = (e.button === 2 || e.shiftKey); lx = e.clientX; ly = e.clientY; stage.classList.add("grabbing"); try { stage.setPointerCapture(e.pointerId); } catch (_) { } });
+      stage.addEventListener("pointermove", e => {
+        if (!dragging) return;
+        if (panning) { // 右键 / Shift+左键拖拽：沿相机右/上方向平移观察点
+          const fwd = new THREE.Vector3().subVectors(lookAt, camera.position).normalize();   // 视线方向
+          const right = new THREE.Vector3().crossVectors(fwd, camera.up).normalize();        // 相机右方向
+          const up2 = new THREE.Vector3().crossVectors(right, fwd).normalize();              // 相机上方向
+          const pk = cam.r * 0.0016; // 平移灵敏度随距离缩放（远了移得快，画面跟手）
+          lookAt.addScaledVector(right, -(e.clientX - lx) * pk).addScaledVector(up2, (e.clientY - ly) * pk);
+        } else { // 左键拖拽：绕观察点旋转（限制俯仰角避免翻转）
+          cam.theta -= (e.clientX - lx) * 0.006;
+          cam.phi = Math.min(1.45, Math.max(0.25, cam.phi - (e.clientY - ly) * 0.006));
+        }
+        lx = e.clientX; ly = e.clientY; camUpdate();
+      });
+      ["pointerup", "pointercancel", "pointerleave"].forEach(ev => stage.addEventListener(ev, () => { dragging = false; stage.classList.remove("grabbing"); }));
+      // 滚轮缩放：距离按 10% 步进，限制在 [0.25, 4] 倍场景跨度内
+      stage.addEventListener("wheel", e => {
+        e.preventDefault();
+        cam.r = Math.min(span * 4, Math.max(span * 0.25, cam.r * (e.deltaY > 0 ? 1.1 : 0.9)));
+        camUpdate();
+      }, { passive: false });
+      // 窗口尺寸变化时自适应画布与相机宽高比
+      window.addEventListener("resize", () => {
+        W5 = stage.clientWidth || W5;
+        renderer.setSize(W5, H5); camera.aspect = W5 / H5; camera.updateProjectionMatrix();
+      });
+      /* ---- HTML 标注跟随 3D 锚点（每帧把 3D 锚点投影到屏幕坐标，移动对应的 .s5-tag） ---- */
+      const lblIn = $("#s5-lbl-in"), lblK = $("#s5-lbl-k"), lblOut = $("#s5-lbl-out");
+      const ancIn = new THREE.Vector3().copy(inPos).addScaledVector(inVv, PN / 2 + 5);   // 输入体上方锚点
+      const ancOut = flow2world(new THREE.Vector3(OUT_X0 + (boxCap - 1) / 2, SIDE / 2 + 5, 0)); // 输出盒上方锚点
+      const _v = new THREE.Vector3(), _up = new THREE.Vector3(0, 3.4, 0); // 复用临时向量；核标注上移量
+      // placeLabel：3D 点 → NDC 投影 → 舞台内像素坐标，驱动 HTML 标注位置
+      function placeLabel(elm, v) {
+        const p = v.clone().project(camera);
+        elm.style.left = ((p.x * 0.5 + 0.5) * stage.clientWidth) + "px";
+        elm.style.top = ((-p.y * 0.5 + 0.5) * stage.clientHeight) + "px";
+      }
+      /* ---- 渲染循环：仅当章节可见时才 render（IntersectionObserver 跟踪 s5vis），省 GPU ---- */
+      let s5vis = false;
+      new IntersectionObserver(es => { es.forEach(e => { s5vis = e.isIntersecting; }); }, { rootMargin: "120px" }).observe(stage);
+      (function loop() {
+        requestAnimationFrame(loop);
+        if (!s5vis) return;
+        const now = performance.now();
+        if (sweeping) { // 滑窗在当前行内从左到右连续扫描（一个步进周期扫完一整行）
+          const sweepF = Math.min(1, (now - sweepT0) / (110 / SPEED)); // 行内扫描进度 0→1
+          winTarget.copy(winTargetPos(winRow, sweepF * (SIDE - 1)));
+        }
+        winGroup.position.lerp(winTarget, 0.35); // 窗口平滑跟随
+        winMat.emissiveIntensity = 0.3 + 0.15 * Math.sin(now * 0.008); // 窗口呼吸发光
+        kernGroups.forEach((g, i) => { // 窗口扫到哪一层，哪个核就持续抬起 + 发光；换行脉冲叠加其上，换核/结束后平滑回落
+          const s = (now - g.userData.pulseT) / 240;
+          const pulse = (s >= 0 && s < 1) ? Math.sin(Math.PI * s) : 0;
+          const active = (i === curK && sweeping && s5.pos < S5_TOTAL) ? 1 : 0;
+          g.userData.act = (g.userData.act || 0) + (Math.min(1.6, active + pulse) - (g.userData.act || 0)) * 0.25;
+          const a = g.userData.act;
+          g.scale.setScalar(1 + 0.16 * a);
+          g.position.y = g.userData.baseY + 0.9 * a;
+          g.userData.mat.emissiveIntensity = 0.5 * a;
+        });
+        let dirty = false; // 输出方块“长出”弹跳动画
+        for (let i = pops.length - 1; i >= 0; i--) {
+          const p = pops[i], q = outPos[p.idx];
+          const s = (now - p.t0) / 240;
+          if (s >= 1) { setInst(outMesh, p.idx, q[0], q[1], q[2], V); pops.splice(i, 1); }
+          else setInst(outMesh, p.idx, q[0], q[1], q[2], V * Math.max(0.05, easeOutBack(s)));
+          dirty = true;
+        }
+        if (dirty) outMesh.instanceMatrix.needsUpdate = true;
+        placeLabel(lblIn, ancIn);
+        placeLabel(lblK, flow2world(_v.copy(kernGroups[curK].position).add(_up)));
+        placeLabel(lblOut, ancOut);
+        renderer.render(scene, camera);
+      })();
+    })();
+    /* ---- 文案数字同步：HTML 里 <span data-v="..."> 全部由 Global_CFG 推导填充，改配置即第 1–5 节全页生效 ---- */
+    (function fillCfgText() {
+      const VALS = {
+        padCells: PAD_CELLS, muls: MULS, kk: K * K,
+        inN: Global_CFG.inN, inC: Global_CFG.inC, pad: Global_CFG.pad, stride: Global_CFG.stride, kSize: Global_CFG.kSize,
+        kernels: Global_CFG.kernels, outCap: Global_CFG.outCap,
+        PN: S5_PN, SIDE: S5_SIDE, PERK: S5_PER_KERNEL, TOTAL: S5_TOTAL, BATCH: S5_BATCH, steps: S5_TOTAL / S5_BATCH,
+        params1: Global_CFG.outCap * MULS,                       // 权重参数数
+        paramsTotal: Global_CFG.outCap * (MULS + 1),             // 权重 + 偏置
+        flops: (S5_PER_KERNEL * Global_CFG.outCap * MULS * 2 / 1e6).toFixed(1), // 乘+加各计 1 次，单位 MFLOPs
+      };
+      document.querySelectorAll("[data-v]").forEach(sp => { const v = VALS[sp.dataset.v]; if (v != null) sp.textContent = v; });
+    })();
+    s5UpdateHUD();
+
+    /* ================= 全局控制 ================= */
+    // SECS：章节 id → 动画控制器（sec0/sec6 无动画故不在表中）；SECNAMES：顶栏「当前控制」显示名
+    const SECS = { sec1: s1, sec2: s2, sec3: s3, sec4: s4, sec5: s5 };
+    const SECNAMES = { sec0: "概览（无动画）", sec1: "Padding 填充", sec2: "滑窗卷积", sec3: "真实数值特写", sec4: "32 个卷积核", sec5: "3D 全景演示", sec6: "总结（无动画）" };
+    let activeSec = "sec2"; // 当前受控章节（默认滑窗卷积，滚动时由 IntersectionObserver 更新）
+    // 根据受控章节的播放状态刷新播放按钮文字
+    function updatePlayBtn() {
+      const s = SECS[activeSec];
+      $("#btnPlay").textContent = (s && s.playing) ? "⏸ 暂停" : "▶ 播放";
+    }
+    // 顶部三个按钮：都通过 SECS 分发到当前受控章节
+    $("#btnPlay").onclick = () => { const s = SECS[activeSec]; if (s) s.toggle(); };
+    $("#btnStep").onclick = () => { const s = SECS[activeSec]; if (s) { s.pause(); s.step(); } };
+    $("#btnReset").onclick = () => { const s = SECS[activeSec]; if (s) s.reset(); };
+    const speedSlider = $("#speedSlider"), speedLabel = $("#speedLabel");
+    speedSlider.oninput = () => { // 对数刻度 0.1x – 50x
+      SPEED = Math.pow(10, +speedSlider.value); // 滑块值即 log10(倍率)：-1→0.1x，0→1x，~1.699→50x
+      const v = SPEED < 1 ? parseFloat(SPEED.toFixed(2)) : SPEED < 10 ? parseFloat(SPEED.toFixed(1)) : Math.round(SPEED);
+      speedLabel.textContent = "速度 " + v + "x";
+    };
+    // 每节右上角的「↺ 重播本节」：重置后立即播放该节
+    document.querySelectorAll(".replay").forEach(b => {
+      b.onclick = () => { const s = SECS[b.dataset.replay]; if (s) { s.reset(); s.play(); } };
+    });
+    /* 章节可见性跟踪：哪个章节滚进视口，顶部按钮就控制哪一节，侧边导航同步高亮 */
+    const io = new IntersectionObserver(es => {
+      es.forEach(e => {
+        if (e.isIntersecting) {
+          activeSec = e.target.id;
+          document.querySelectorAll("#sidenav a").forEach(a => a.classList.toggle("active", a.dataset.sec === activeSec));
+          $("#activeSecLabel").textContent = "当前控制：" + (SECNAMES[activeSec] || activeSec);
+          updatePlayBtn();
+        }
+      });
+    }, { rootMargin: "-40% 0px -55% 0px" }); // 触发带收缩到视口中部附近，避免两节交界抖动
+    ["sec0", "sec1", "sec2", "sec3", "sec4", "sec5", "sec6"].forEach(id => io.observe(document.getElementById(id)));
+  </script>
+</body>
+
+</html>

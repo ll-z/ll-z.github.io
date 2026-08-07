@@ -1,0 +1,113 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Animated AI 演示集合</title>
+  <style>
+    /* ---------- 与演示页一致的深色主题 ---------- */
+    :root {
+      --bg: #0d1117;        /* 页面背景 */
+      --panel: #161b22;     /* 卡片背景 */
+      --border: #2b3440;    /* 边框 */
+      --text: #e6edf3;      /* 主文字 */
+      --muted: #8b949e;     /* 次要文字 */
+      --accent: #3ddad7;    /* 强调青（与演示页 --out 一致） */
+      --win: #ffd43b;       /* 点缀黄（与演示页 --win 一致） */
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      background: var(--bg);
+      color: var(--text);
+      font-family: "PingFang SC", "Microsoft YaHei", system-ui, sans-serif;
+      min-height: 100vh;
+    }
+    /* ---------- 页头 ---------- */
+    header {
+      max-width: 1100px;
+      margin: 0 auto;
+      padding: 56px 24px 8px;
+    }
+    h1 { font-size: 28px; margin: 0 0 8px; }
+    h1 .hl { color: var(--accent); }
+    .sub { color: var(--muted); font-size: 14px; margin: 0; }
+    /* ---------- 项目卡片网格 ---------- */
+    main {
+      max-width: 1100px;
+      margin: 0 auto;
+      padding: 24px;
+      display: grid;
+      grid-template-columns: repeat(auto-fill, minmax(300px, 1fr));
+      gap: 16px;
+    }
+    .card {
+      display: block;
+      background: var(--panel);
+      border: 1px solid var(--border);
+      border-radius: 14px;
+      padding: 20px 22px;
+      text-decoration: none;
+      color: var(--text);
+      transition: border-color .2s, transform .2s, box-shadow .2s;
+    }
+    .card:hover {
+      border-color: var(--accent);
+      transform: translateY(-3px);
+      box-shadow: 0 8px 24px rgba(61, 218, 215, .12);
+    }
+    .card .tag {
+      display: inline-block;
+      font-size: 11px;
+      color: var(--win);
+      border: 1px solid rgba(255, 212, 59, .35);
+      border-radius: 999px;
+      padding: 2px 10px;
+      margin-bottom: 10px;
+    }
+    .card h2 { font-size: 17px; margin: 0 0 8px; }
+    .card p { font-size: 13px; color: var(--muted); line-height: 1.7; margin: 0; }
+    .card .go { display: inline-block; margin-top: 12px; font-size: 12px; color: var(--accent); }
+    /* ---------- 页脚 ---------- */
+    footer {
+      max-width: 1100px;
+      margin: 0 auto;
+      padding: 12px 24px 48px;
+      color: var(--muted);
+      font-size: 12px;
+    }
+  </style>
+</head>
+<body>
+  <header>
+    <h1><span class="hl">Animated AI</span> 演示集合</h1>
+    <p class="sub">神经网络 / 深度学习概念的可视化小演示，纯前端、零依赖、离线可用。</p>
+  </header>
+  <main id="list"></main>
+  <footer>静态托管 · 项目文件在各自子目录中，新增项目只需在下方 <code>projects</code> 数组里加一行。</footer>
+
+  <script>
+    "use strict";
+    /* ================= 项目清单：新增项目在这里加一行 =================
+       title: 卡片标题；desc: 一句话简介；tag: 角标；href: 项目入口（相对路径） */
+    const projects = [
+      {
+        title: "YOLO26 第一层卷积 · 计算过程动画",
+        desc: "从零拆解 Conv 3×3 / stride 2 / pad 1：Padding 填充、滑窗卷积、真实数值演算、卷积核堆叠，外加 Three.js 体素 3D 全景演示（使用真实模型权重）。",
+        tag: "Three.js · 体素动画",
+        href: "./app/",
+      },
+    ];
+
+    /* ---------- 渲染卡片 ---------- */
+    const list = document.getElementById("list");
+    for (const p of projects) {
+      const a = document.createElement("a");
+      a.className = "card";
+      a.href = p.href;
+      a.innerHTML = `<span class="tag">${p.tag}</span><h2>${p.title}</h2><p>${p.desc}</p><span class="go">打开演示 →</span>`;
+      list.appendChild(a);
+    }
+  </script>
+</body>
+</html>
