@@ -129,6 +129,18 @@ textarea:focus{border-color:rgba(255,158,64,.5); color:var(--text)}
 .btn-run:hover{color:#0A0B0D; background:#FFB066; transform:translateY(-1px)}
 .btn-run:disabled{background:#2A2E36; color:var(--faint); animation:none; cursor:not-allowed; transform:none}
 @keyframes breathe{0%,100%{box-shadow:0 0 12px rgba(255,158,64,.18)}50%{box-shadow:0 0 30px rgba(255,158,64,.4)}}
+.chips.stack{flex-direction:column}
+.chips.stack .chip{justify-content:flex-start; padding:9px 12px; text-align:left}
+.pairlist{max-height:330px; overflow:auto; border:1px solid var(--border); border-radius:10px; margin-top:12px}
+.pairrow{display:flex; gap:10px; padding:9px 12px; border-bottom:1px solid var(--border);
+  font-family:var(--mono); font-size:11px; line-height:1.5; cursor:pointer; align-items:flex-start}
+.pairrow:last-child{border-bottom:none}
+.pairrow input{accent-color:var(--signal); margin:3px 0 0; cursor:pointer; flex:none}
+.pairrow .pid{color:var(--signal); min-width:42px; flex:none}
+.pairrow .pnum{display:flex; flex-direction:column; gap:2px; min-width:0}
+.pairrow .pnum i{font-style:normal; color:var(--faint); display:inline-block; min-width:52px}
+.pairrow.off{opacity:.42}
+.rsub{font-family:var(--mono); font-size:10px; color:var(--faint); margin-top:8px; letter-spacing:.05em}
 .chk{
   display:flex; align-items:center; gap:8px; margin-top:10px;
   font-family:var(--mono); font-size:11px; color:var(--faint); cursor:pointer;
@@ -258,14 +270,20 @@ pre.code{
         <input type="file" id="robotFile" accept=".dat,.ls,.mod,.txt" hidden>
       </div>
       <label class="chk"><input type="checkbox" id="chkOutlier">示例数据注入 2mm 超差点（P4）</label>
-      <label class="chk"><input type="checkbox" id="chkTCP">自动标定电极帽 TCP（未知工具偏移 c，需文件含 A/B/C 姿态）</label>
 
       <div class="field-label">三坐标测量文件（.txt，逗号分隔）</div>
-      <textarea id="baseText" spellcheck="false" placeholder="点号,X坐标,Y坐标,Z坐标"></textarea>
+      <textarea id="baseText" spellcheck="false" placeholder="点号,X,Y,Z 或 X,Y,Z（逗号分隔，可带表头）"></textarea>
       <div class="btnrow">
         <button class="btn" id="btnBaseFile"><svg viewBox="0 0 24 24"><path d="M12 16V4m0 0l-4 4m4-4l4 4M4 20h16"/></svg>选择文件</button>
         <button class="btn" id="btnBaseSample"><svg viewBox="0 0 24 24"><path d="M4 6h16M4 12h16M4 18h10"/></svg>载入示例</button>
         <input type="file" id="baseFile" accept=".txt,.csv" hidden>
+      </div>
+
+      <div class="field-label">点位关系（机器人坐标是哪种点？）</div>
+      <div class="chips stack" id="modelChips">
+        <button class="chip active" data-m="auto"><span class="cdot"></span>自动判断（姿态有变化 → 标定 TCP）</button>
+        <button class="chip" data-m="plain"><span class="cdot"></span>机器人点 = 电极帽触点（不计算 TCP）</button>
+        <button class="chip" data-m="tcp"><span class="cdot"></span>机器人点 = 编程 TCP（自动计算偏移 c）</button>
       </div>
 
       <button class="btn btn-run" id="btnRun" disabled>开始计算 →</button>
@@ -280,12 +298,31 @@ pre.code{
         （与 WcsCal 等收费软件同一模型），残差按「实际触点」计算。
       </div>
     </section>
+
+    <section class="panel reveal" style="animation-delay:.08s">
+      <div class="marker">02 / 点位配对与选择</div>
+      <div class="field-label">对齐方式</div>
+      <div class="chips" id="alignChips">
+        <button class="chip active" data-a="auto"><span class="cdot"></span>自动</button>
+        <button class="chip" data-a="id"><span class="cdot"></span>按点号</button>
+        <button class="chip" data-a="order"><span class="cdot"></span>按顺序</button>
+      </div>
+      <div class="btnrow" style="margin-top:10px">
+        <button class="btn" id="btnPair">解析并配对</button>
+        <button class="btn" id="btnAll">全选</button>
+        <button class="btn" id="btnNone">全不选</button>
+        <button class="btn" id="btnInvert">反选</button>
+      </div>
+      <div class="pairlist" id="pairList" hidden></div>
+      <div class="hint" id="pairNote">粘贴两边数据后点「解析并配对」；与收费软件一致，可勾选/剔除参与计算的点后重算。</div>
+      <div class="hint" id="pairCount" style="margin-top:4px"></div>
+    </section>
   </div>
 
   <!-- ================= 右列：结果 ================= -->
   <div>
     <section class="panel reveal" style="animation-delay:.12s" id="secResult">
-      <div class="marker">02 / 变换结果</div>
+      <div class="marker">03 / 变换结果</div>
       <div class="empty" id="resultEmpty">等待计算 —— 请在左侧载入数据后点击「开始计算」<br>机器人坐标系 ⇐ 基坐标系的刚体变换将显示在这里</div>
       <div id="resultBody" hidden>
         <div class="chips" id="dirTabs" style="margin-bottom:16px">
@@ -328,6 +365,7 @@ pre.code{
               <span><i>Y</i><b id="tcpY">—</b></span>
               <span><i>Z</i><b id="tcpZ">—</b></span>
             </div>
+            <div class="rsub" id="tcpNote"></div>
           </div>
         </div>
         <pre class="mat" id="rmat"></pre>
@@ -341,7 +379,7 @@ pre.code{
     </section>
 
     <section class="panel reveal" style="animation-delay:.19s" id="secErr" hidden>
-      <div class="marker">03 / 误差分析</div>
+      <div class="marker">04 / 误差分析</div>
       <table class="err">
         <thead><tr>
           <th>点号</th><th>dX / mm</th><th>dY / mm</th><th>dZ / mm</th><th>|d| / mm</th><th style="width:26%"></th>
@@ -351,7 +389,7 @@ pre.code{
     </section>
 
     <section class="panel reveal" style="animation-delay:.26s" id="secView" hidden>
-      <div class="marker">04 / 空间视图 · 双坐标系误差对比</div>
+      <div class="marker">05 / 空间视图 · 双坐标系误差对比</div>
       <div class="dualview">
         <div class="viewbox">
           <div class="viewtitle">机器人坐标系 · 理论位置（R,t 预测）vs 实际示教点 · 含 BASE 坐标系</div>
@@ -372,7 +410,7 @@ pre.code{
     </section>
 
     <section class="panel reveal" style="animation-delay:.33s">
-      <div class="marker">05 / 算法源码</div>
+      <div class="marker">06 / 算法源码</div>
       <details class="src">
         <summary>查看在浏览器中实际执行的 Python 代码（优化版 ParameterCalculate）</summary>
         <pre class="code" id="srcView"></pre>
@@ -409,38 +447,54 @@ def rotation_from_quat(q):
                      [2*(x*y + w*z), 1-2*(x*x+z*z), 2*(y*z - w*x)],
                      [2*(x*z - w*y), 2*(y*z + w*x), 1-2*(x*x+y*y)]])
 
+def _num_of(s):
+    # 点号文本 -> 编号：POS07 -> 7，XP1 -> 1，p12 -> 12，取不到 -> None
+    m = re.search(r'(\d+)', str(s))
+    return int(m.group(1)) if m else None
+
 def parse_robot_data(text, robot_type):
-    """返回 (点位 Nx3, 姿态 Nx3x3)。姿态取不到时返回 None（此时不能标定 TCP）。"""
-    pos, rot = [], []
+    """返回 (点位 Nx3, 姿态 Nx3x3 或 None, 点号 list 或 None)。"""
+    pos, rot, ids = [], [], []
     if robot_type == 'KUKA':
-        for m in re.finditer(r'E6POS[^{]*\{(.*?)\}', text):
-            kv = dict(re.findall(r'([A-Za-z]+\d*)\s*([-+]?[\d.]+)', m.group(1)))
+        for m in re.finditer(r'E6POS\s+(\w+)\s*=\s*\{(.*?)\}', text):
+            kv = dict(re.findall(r'([A-Za-z]+\d*)\s*([-+]?[\d.]+)', m.group(2)))
             if all(k in kv for k in ('X', 'Y', 'Z')):
                 pos.append([float(kv['X']), float(kv['Y']), float(kv['Z'])])
+                ids.append(_num_of(m.group(1)))
                 if all(k in kv for k in ('A', 'B', 'C')):
                     rot.append(rotation_from_abc(float(kv['A']), float(kv['B']), float(kv['C'])))
     elif robot_type == 'FANUC':
-        for m in re.finditer(r'P\[\d+\]\s*\{(.*?)\}', text, re.S):
-            body = m.group(1)
+        for m in re.finditer(r'P\[(\d+)\]\s*\{(.*?)\}', text, re.S):
+            body = m.group(2)
             kv = dict(re.findall(r'([XYZ])\s*=\s*([-+]?[\d.]+)', body))
             if all(k in kv for k in ('X', 'Y', 'Z')):
                 pos.append([float(kv['X']), float(kv['Y']), float(kv['Z'])])
+                ids.append(int(m.group(1)))
                 ang = dict(re.findall(r'([WPR])\s*=\s*([-+]?[\d.]+)', body))
                 if all(k in ang for k in ('W', 'P', 'R')):
                     rot.append(rotation_from_abc(float(ang['R']), float(ang['P']), float(ang['W'])))
-    else:  # ABB: MoveL [[x,y,z],[q1,q2,q3,q4],[...],[...]], v200, fine, tool0;
+    else:  # ABB: MoveL / MoveP，无点名，按出现次序编号
+        k = 0
         for line in text.splitlines():
             a = line.split()
             if a and a[0] in ('MoveL', 'MoveP'):
                 b = a[1].replace(']', '').replace('[', '').split(',')
                 if len(b) > 7:
+                    k += 1
                     pos.append([float(b[0]), float(b[1]), float(b[2])])
+                    ids.append(k)
                     rot.append(rotation_from_quat(b[3:7]))
-    return np.array(pos).reshape(-1, 3), (np.array(rot) if len(rot) == len(pos) and rot else None)
+    pos = np.array(pos).reshape(-1, 3)
+    return (pos,
+            (np.array(rot) if rot and len(rot) == len(pos) else None),
+            (ids if ids and len(ids) == len(pos) else None))
 
 def parse_base_data(text):
-    """三坐标文件：兼容「点号,X,Y,Z」与「X,Y,Z」两种列格式，自动跳过表头。"""
-    data = []
+    """三坐标文件，返回 (点位 Nx3, 点号 list 或 None)。
+
+    兼容「点号,X,Y,Z」与「X,Y,Z」两种列格式，自动跳过表头。
+    """
+    data, ids = [], []
     for line in text.splitlines():
         parts = [v.strip() for v in re.split(r'[,;\t]', line.strip()) if v.strip() != '']
         if len(parts) < 3:
@@ -453,9 +507,66 @@ def parse_base_data(text):
                 vals.append(None)
         if len(parts) >= 4 and vals[1] is not None and vals[2] is not None and vals[3] is not None:
             data.append(vals[1:4])          # 点号,X,Y,Z
+            ids.append(_num_of(parts[0]))
         elif vals[0] is not None and vals[1] is not None and vals[2] is not None:
             data.append(vals[0:3])          # X,Y,Z
-    return np.array(data).reshape(-1, 3)
+            ids.append(None)
+    data = np.array(data).reshape(-1, 3)
+    return data, (ids if data.shape[0] and all(v is not None for v in ids) else None)
+
+# ---------- 点位配对：优先按点号，缺号时按文件顺序 ----------
+def pair_points(nr, nb, rid, bid, align='auto'):
+    """rid/bid 为点号列表（可为 None），nr/nb 为两侧点数。
+
+    返回 (pairs, mode, note)，pairs = [(机器人下标, 三坐标下标), ...]。
+    """
+    rid = list(rid) if rid else []
+    bid = list(bid) if bid else []
+    have_id = (len(rid) == nr and len(bid) == nb and nr > 0 and nb > 0
+               and all(x is not None for x in rid) and all(x is not None for x in bid))
+    if align == 'id' or (align == 'auto' and have_id):
+        if not have_id:
+            p = [(i, i) for i in range(min(nr, nb))]
+            return p, 'order', '两侧点号不全，已退回「按文件顺序」对齐（第 i 行 ↔ 第 i 行）'
+        bmap, dup = {}, []
+        for j, x in enumerate(bid):
+            if x in bmap:
+                dup.append(x)
+            bmap[x] = j
+        pairs = [(i, bmap[x]) for i, x in enumerate(rid) if x in bmap]
+        miss = [x for x in rid if x not in bmap]
+        note = '按点号对齐：机器人 %d 点 / 三坐标 %d 点 → 匹配 %d 对' % (nr, nb, len(pairs))
+        if miss:
+            note += '；机器人侧 %d 个点号在三坐标里没有，已跳过' % len(miss)
+        if dup:
+            note += '；三坐标侧点号重复 %s（取最后一条）' % sorted(set(dup))
+        return pairs, 'id', note
+    p = [(i, i) for i in range(min(nr, nb))]
+    note = '按文件顺序对齐：第 i 行 ↔ 第 i 行，共 %d 对' % len(p)
+    if nr != nb:
+        note += '（机器人 %d 点 / 三坐标 %d 点，多出的已忽略）' % (nr, nb)
+    return p, 'order', note
+
+def preview_points(robot_text, base_text, robot_type, align='auto'):
+    """供页面「解析并配对」使用：返回配对表，供勾选参与计算的点。"""
+    rob, rot, rid = parse_robot_data(robot_text, robot_type)
+    base, bid = parse_base_data(base_text)
+    if len(rob) == 0 or len(base) == 0:
+        return json.dumps({'ok': False, 'message': '未能从文件中解析出点位，请检查文件格式与机器人类型是否匹配'})
+    pairs, mode, note = pair_points(len(rob), len(base), rid, bid, align)
+    if len(pairs) < 3:
+        return json.dumps({'ok': False, 'message': '配对后不足 3 对点（机器人 %d 点 / 三坐标 %d 点），无法计算' % (len(rob), len(base))})
+    spread = orientation_spread(rot) if rot is not None else 0.0
+    return json.dumps({
+        'ok': True, 'n_robot': int(len(rob)), 'n_base': int(len(base)),
+        'mode': mode, 'note': note, 'has_pose': rot is not None,
+        'spread': spread, 'tcp_ok': bool(rot is not None and spread >= 5.0),
+        'pairs': [{'k': k, 'i': int(i), 'j': int(j),
+                   'rid': (rid[i] if rid else None), 'bid': (bid[j] if bid else None),
+                   'rob': [round(float(v), 3) for v in rob[i]],
+                   'bas': [round(float(v), 3) for v in base[j]]}
+                  for k, (i, j) in enumerate(pairs)],
+    })
 
 # ---------- 1. 刚体配准：SVD 求最优 R, t ----------
 def rigid_transform_3D(source, target):
@@ -605,32 +716,43 @@ def error_calculation(source, target, R, t):
     mae  = float(np.mean(per_point))
     return err_vec, per_point, rmse, mae
 
-def run_calculation(robot_text, base_text, robot_type, use_tcp=False):
-    rob, Rt = parse_robot_data(robot_text, robot_type)
-    base = parse_base_data(base_text)
+def run_calculation(robot_text, base_text, robot_type, model='auto', align='auto', keep_json=''):
+    """model: auto / plain（机器人点=电极帽触点）/ tcp（机器人点=编程TCP，标定 c）
+       keep_json: JSON 数组，指定参与计算的配对序号；空 = 全部参与。"""
+    rob, rot, rid = parse_robot_data(robot_text, robot_type)
+    base, bid = parse_base_data(base_text)
     if len(rob) == 0 or len(base) == 0:
         return json.dumps({'ok': False, 'message': '未能从文件中解析出点位，请检查文件格式与机器人类型是否匹配'})
-    if len(rob) != len(base):
-        return json.dumps({'ok': False, 'message': '选择的文件中点位不等：机器人 %d 点 / 三坐标 %d 点' % (len(rob), len(base))})
-    if len(rob) < 3:
-        return json.dumps({'ok': False, 'message': '测量点至少为三点'})
+    pairs, mode, note = pair_points(len(rob), len(base), rid, bid, align)
+    if keep_json:
+        keep = json.loads(keep_json)
+        pairs = [pairs[k] for k in keep if 0 <= k < len(pairs)]
+    if len(pairs) < 3:
+        return json.dumps({'ok': False, 'message': '参与计算的点不足 3 对（当前 %d 对），无法计算' % len(pairs)})
 
+    ri = [i for i, _ in pairs]
+    bi = [j for _, j in pairs]
+    Q  = rob[ri]                       # 机器人 E6POS（编程 TCP）
+    P  = base[bi]                      # 三坐标测量点
+    Rt = rot[ri] if rot is not None else None
     spread = orientation_spread(Rt) if Rt is not None else 0.0
-    tcp = None
+
+    use_tcp = (model == 'tcp') or (model == 'auto' and Rt is not None and spread >= 5.0)
     if use_tcp:
         if Rt is None:
-            return json.dumps({'ok': False, 'message': '这份机器人文件里没有解析到姿态（A/B/C 或四元数），无法自动标定 TCP；请换用含姿态的程序文件，或取消勾选'})
+            return json.dumps({'ok': False, 'message': '这份机器人文件里没有解析到姿态（A/B/C 或四元数），无法自动标定 TCP；请改选「电极帽触点」模型'})
         if spread < 5.0:
             return json.dumps({'ok': False, 'message': '各示教点姿态几乎相同（工具 Z 轴最大夹角仅 %.1f°），TCP 不可辨识；请使用姿态有明显变化的示教点' % spread})
-        R, t, tcp, _ = rigid_transform_with_tcp(base, rob, Rt)
+        R, t, tcp, _ = rigid_transform_with_tcp(P, Q, Rt)
     else:
-        R, t = rigid_transform_3D(base, rob)
+        R, t = rigid_transform_3D(P, Q)
+        tcp = None
 
-    target = rob if tcp is None else rob + Rt @ tcp      # 实际电极帽触点
+    target = Q if tcp is None else Q + Rt @ tcp      # 实际电极帽触点
     euler, oat = rotation_matrix_to_euler(R)
     quat = quaternion_calculator(R)
-    err, per_point, rmse, mae = error_calculation(base, target, R, t)
-    aligned = (R.T @ (target - t).T).T                  # 触点回算到基坐标系，用于可视化
+    err, per_point, rmse, mae = error_calculation(P, target, R, t)
+    aligned = (R.T @ (target - t).T).T               # 触点回算到基坐标系，用于可视化
 
     # 逆变换：base ≈ R_inv @ rob + t_inv（机器人 → 基）
     R_inv = R.T
@@ -638,11 +760,16 @@ def run_calculation(robot_text, base_text, robot_type, use_tcp=False):
     euler_inv, oat_inv = rotation_matrix_to_euler(R_inv)
     quat_inv = quaternion_calculator(R_inv)
 
+    labels = [('P%d' % rid[i]) if (rid and rid[i] is not None) else ('#%d' % (k + 1))
+              for k, i in enumerate(ri)]
+
     return json.dumps({
-        'ok': True, 'n': int(len(rob)),
+        'ok': True, 'n': int(len(pairs)),
+        'model': ('tcp' if tcp is not None else 'plain'),
         'use_tcp': bool(tcp is not None),
         'tcp': (tcp.tolist() if tcp is not None else None),
-        'spread': spread,
+        'spread': spread, 'align': mode, 'note': note,
+        'labels': labels, 'pairs': [[int(i), int(j)] for i, j in pairs],
         't': t.tolist(), 'R': R.tolist(),
         'euler': euler, 'oat': oat, 'quat': quat,
         'inv': {'t': t_inv.tolist(), 'R': R_inv.tolist(),
@@ -650,7 +777,7 @@ def run_calculation(robot_text, base_text, robot_type, use_tcp=False):
         'err': err.tolist(), 'per_point': per_point.tolist(),
         'rmse': rmse, 'mae': mae,
         'max_abs': float(np.abs(err).max()),
-        'base': base.tolist(), 'rob': rob.tolist(),
+        'base': P.tolist(), 'rob': Q.tolist(),
         'rob_actual': target.tolist(), 'aligned': aligned.tolist(),
     })
 </script>
@@ -741,6 +868,7 @@ ENDMODULE`
 
 /* ================= 状态 ================= */
 let pyodide = null, robotType = 'KUKA', lastResult = null;
+let model = 'auto', align = 'auto', pairData = null, keepSet = new Set();
 const $ = id => document.getElementById(id);
 
 /* ================= Python 引擎加载 ================= */
@@ -756,6 +884,7 @@ async function bootEngine(){
     // 自动载入示例，便于一键演示
     $('robotText').value = SAMPLE_ROBOT[robotType];
     $('baseText').value  = SAMPLE_BASE;
+    previewPairs();                       // 载入示例后直接列出配对表
   }catch(e){
     $('enginePill').classList.add('error');
     $('engineText').textContent = '引擎加载失败：请检查网络（需访问 cdn.jsdelivr.net）';
@@ -769,16 +898,106 @@ $('srcView').textContent = $('pySrc').textContent.trim();
 /* ================= 交互 ================= */
 $('robotChips').addEventListener('click', e=>{
   const chip = e.target.closest('.chip'); if(!chip) return;
-  document.querySelectorAll('.chip').forEach(c=>c.classList.remove('active'));
+  $('robotChips').querySelectorAll('.chip').forEach(c=>c.classList.remove('active'));
   chip.classList.add('active');
   robotType = chip.dataset.r;
+  invalidatePairs();
 });
+
+/* 点位关系：机器人坐标是「电极帽触点」还是「编程 TCP」 */
+$('modelChips').addEventListener('click', e=>{
+  const chip = e.target.closest('.chip'); if(!chip) return;
+  $('modelChips').querySelectorAll('.chip').forEach(c=>c.classList.remove('active'));
+  chip.classList.add('active');
+  model = chip.dataset.m;
+});
+
+/* 点号对齐方式 */
+$('alignChips').addEventListener('click', e=>{
+  const chip = e.target.closest('.chip'); if(!chip) return;
+  $('alignChips').querySelectorAll('.chip').forEach(c=>c.classList.remove('active'));
+  chip.classList.add('active');
+  align = chip.dataset.a;
+  invalidatePairs('对齐方式已改为「' + chip.textContent.trim() + '」，请重新点「解析并配对」。');
+});
+
+/* ================= 点位配对与勾选 ================= */
+function invalidatePairs(msg){
+  pairData = null; keepSet = new Set();
+  $('pairList').hidden = true; $('pairList').innerHTML = '';
+  $('pairCount').textContent = '';
+  $('pairNote').textContent = msg || '数据已修改，请重新点「解析并配对」。';
+}
+
+function pairLabel(p){
+  const n = (p.rid != null) ? p.rid : ((p.bid != null) ? p.bid : p.k + 1);
+  return 'P' + n;
+}
+
+function previewPairs(){
+  if(!pyodide) return false;
+  pyodide.globals.set('g_robot_text', $('robotText').value);
+  pyodide.globals.set('g_base_text',  $('baseText').value);
+  pyodide.globals.set('g_rtype', robotType);
+  pyodide.globals.set('g_align', align);
+  let res;
+  try{ res = JSON.parse(pyodide.runPython('preview_points(g_robot_text, g_base_text, g_rtype, g_align)')); }
+  catch(err){ showError('解析异常：' + err.message); return false; }
+  if(!res.ok){ showError(res.message); invalidatePairs(''); $('pairNote').textContent = res.message; return false; }
+  pairData = res;
+  keepSet = new Set(res.pairs.map(p=>p.k));
+  renderPairList(res);
+  return true;
+}
+
+function renderPairList(res){
+  $('pairList').hidden = false;
+  $('pairList').innerHTML = res.pairs.map(p=>`
+    <label class="pairrow" data-k="${p.k}">
+      <input type="checkbox" checked data-k="${p.k}">
+      <span class="pid">${pairLabel(p)}</span>
+      <span class="pnum">
+        <span><i>机器人</i>${p.rob.map(v=>v.toFixed(2)).join(', ')}</span>
+        <span><i>三坐标</i>${p.bas.map(v=>v.toFixed(2)).join(', ')}</span>
+      </span>
+    </label>`).join('');
+  $('pairNote').innerHTML = res.note
+    + `<br>机器人 ${res.n_robot} 点 / 三坐标 ${res.n_base} 点 · 配成 ${res.pairs.length} 对`
+    + ` · 工具姿态跨度 ${res.spread.toFixed(1)}°`
+    + (res.has_pose ? (res.tcp_ok ? '（姿态有变化，可自动标定 TCP）' : '（姿态几乎无变化，TCP 不可辨识）') : '（文件无姿态数据，只能按电极帽触点模型算）');
+  $('pairList').querySelectorAll('input').forEach(cb=>{
+    cb.onchange = ()=>{
+      const k = +cb.dataset.k;
+      if(cb.checked) keepSet.add(k); else keepSet.delete(k);
+      cb.closest('.pairrow').classList.toggle('off', !cb.checked);
+      updateCount();
+    };
+  });
+  updateCount();
+}
+
+function updateCount(){
+  $('pairCount').textContent = pairData
+    ? `已选 ${keepSet.size} / ${pairData.pairs.length} 对参与计算`
+    : '';
+}
+
+function setAllPairs(v){
+  if(!pairData) return;
+  $('pairList').querySelectorAll('input').forEach(cb=>{ cb.checked = v; cb.onchange(); });
+}
+$('btnPair').onclick   = ()=>{ if(!$('btnRun').disabled) previewPairs(); };
+$('btnAll').onclick    = ()=>setAllPairs(true);
+$('btnNone').onclick   = ()=>setAllPairs(false);
+$('btnInvert').onclick = ()=>{ if(!pairData) return;
+  $('pairList').querySelectorAll('input').forEach(cb=>{ cb.checked = !cb.checked; cb.onchange(); }); };
+['robotText','baseText'].forEach(id=>$(id).addEventListener('input', ()=>invalidatePairs()));
 function bindFile(btnId, inputId, target){
   $(btnId).onclick = ()=>$(inputId).click();
   $(inputId).onchange = e=>{
     const f = e.target.files[0]; if(!f) return;
     const rd = new FileReader();
-    rd.onload = ()=>{ $(target).value = rd.result; };
+    rd.onload = ()=>{ $(target).value = rd.result; invalidatePairs(); };
     rd.readAsText(f);
     e.target.value = '';
   };
@@ -790,12 +1009,13 @@ function currentRobotSample(){
   if($('chkOutlier').checked) s = s.replace('110.885', '112.885');  // P4 的 X 注入 +2mm
   return s;
 }
-$('btnRobotSample').onclick = ()=>{ $('robotText').value = currentRobotSample(); };
+$('btnRobotSample').onclick = ()=>{ $('robotText').value = currentRobotSample(); invalidatePairs(); };
 $('chkOutlier').onchange = ()=>{
   $('robotText').value = currentRobotSample();
-  if(pyodide && $('baseText').value.trim()) $('btnRun').click();
+  invalidatePairs();
+  if(pyodide && $('baseText').value.trim() && previewPairs()) $('btnRun').click();
 };
-$('btnBaseSample').onclick  = ()=>{ $('baseText').value  = SAMPLE_BASE; };
+$('btnBaseSample').onclick  = ()=>{ $('baseText').value  = SAMPLE_BASE; invalidatePairs(); };
 
 const fmt = (x,d=4)=> (x>=0?' ':'') + Number(x).toFixed(d);
 
@@ -805,11 +1025,15 @@ $('btnRun').onclick = ()=>{
   $('btnRun').textContent = '计算中…';
   setTimeout(()=>{
     try{
+      if(!pairData && !previewPairs()) return;
+      if(keepSet.size < 3){ showError('参与计算的点少于 3 对，请在「02 / 点位配对与选择」里多勾选几个点'); return; }
       pyodide.globals.set('g_robot_text', $('robotText').value);
       pyodide.globals.set('g_base_text',  $('baseText').value);
       pyodide.globals.set('g_rtype', robotType);
-      pyodide.globals.set('g_use_tcp', $('chkTCP').checked);
-      const res = JSON.parse(pyodide.runPython('run_calculation(g_robot_text, g_base_text, g_rtype, g_use_tcp)'));
+      pyodide.globals.set('g_model', model);
+      pyodide.globals.set('g_align', align);
+      pyodide.globals.set('g_keep', JSON.stringify([...keepSet].sort((a,b)=>a-b)));
+      const res = JSON.parse(pyodide.runPython('run_calculation(g_robot_text, g_base_text, g_rtype, g_model, g_align, g_keep)'));
       if(!res.ok){ showError(res.message); return; }
       lastResult = res;
       renderResult(res);
@@ -843,21 +1067,27 @@ function renderResult(r){
     $('tcpX').textContent = fmt(r.tcp[0],3);
     $('tcpY').textContent = fmt(r.tcp[1],3);
     $('tcpZ').textContent = fmt(r.tcp[2],3);
+    $('tcpNote').textContent = `|c| = ${Math.hypot(...r.tcp).toFixed(3)} mm · 工具姿态跨度 ${r.spread.toFixed(1)}° · 参与 ${r.n} 点`;
+  } else {
+    $('tcpNote').textContent = '';
   }
 
   const bad = r.max_abs > 1;
   const badge = $('errBadge');
   badge.className = 'badge ' + (bad ? 'bad' : 'ok');
   badge.textContent = bad ? '结果超差' : '合格';
-  $('errNote').textContent = `点位数 ${r.n} · RMSE ${r.rmse.toFixed(4)} mm · MAE ${r.mae.toFixed(4)} mm · 最大分量误差 ${r.max_abs.toFixed(4)} mm · 阈值 ±1 mm`
-    + (r.use_tcp ? ` · TCP |c| = ${Math.hypot(r.tcp[0],r.tcp[1],r.tcp[2]).toFixed(3)} mm（工具坐标系，姿态跨度 ${r.spread.toFixed(1)}°）` : '');
+  $('errNote').textContent = `模型：${r.model === 'tcp' ? '9 参数（机器人点=编程 TCP，已自动标定电极帽偏移 c）' : '单一刚体变换（机器人点=电极帽触点）'}`
+    + ` · 参与 ${r.n} 点 · 对齐 ${r.align === 'id' ? '按点号' : '按顺序'}`
+    + ` · RMSE ${r.rmse.toFixed(4)} mm · MAE ${r.mae.toFixed(4)} mm · 最大分量误差 ${r.max_abs.toFixed(4)} mm · 阈值 ±1 mm`
+    + (r.use_tcp ? ` · |c| = ${Math.hypot(...r.tcp).toFixed(3)} mm` : '');
 
   /* 误差表 */
   const maxN = Math.max(...r.per_point);
+  const LB = i => (r.labels && r.labels[i]) || ('P' + (i + 1));
   $('errRows').innerHTML = r.err.map((e,i)=>{
     const n = r.per_point[i], hot = n > 1;
     return `<tr>
-      <td>P${i+1}</td>
+      <td>${LB(i)}</td>
       <td class="${Math.abs(e[0])>1?'hot':''}">${fmt(e[0])}</td>
       <td class="${Math.abs(e[1])>1?'hot':''}">${fmt(e[1])}</td>
       <td class="${Math.abs(e[2])>1?'hot':''}">${fmt(e[2])}</td>
@@ -918,6 +1148,8 @@ q1 q2 q3 q4
 ${mat(d.R)}`;
   const txt =
 `坐标变换计算结果（Python/NumPy 引擎）
+模型：${r.model === 'tcp' ? '9 参数（含电极帽 TCP 自动标定）' : '单一刚体变换'}
+对齐：${r.align === 'id' ? '按点号' : '按顺序'} · 参与 ${r.n} 点 · 点号 ${(r.labels||[]).join(' ')}
 
 ${blk(r,    '变换 ① 基坐标系 → 机器人坐标系（正向）')}
 
@@ -927,7 +1159,7 @@ ${r.use_tcp ? `
   ${fmt(r.tcp[0],6).padStart(11)}${fmt(r.tcp[1],6).padStart(11)}${fmt(r.tcp[2],6).padStart(11)}
   |c| = ${Math.hypot(r.tcp[0],r.tcp[1],r.tcp[2]).toFixed(6)} mm
 ` : ''}
-Err (dX dY dZ / mm)
+Err (dX dY dZ / mm)   [${(r.labels||[]).join(', ')}]
 ${mat(r.err)}
 
 RMSE ${r.rmse.toFixed(6)} mm
@@ -1121,6 +1353,7 @@ function drawAll(){
   if(!viewData) return;
   const r = viewData;
   /* 理论位置（机器人坐标系下由 R,t 预测的示教点）：pred = R @ base + t = rob - err */
+  const LBL = i => (r.labels && r.labels[i]) || ('P' + (i + 1));
   const robNow = r.rob_actual || r.rob;   // 标定 TCP 后为「实际电极帽触点」= E6POS + Rtool·c
   const pred = robNow.map((p,i)=>p.map((v,k)=> v - r.err[i][k]));
 
@@ -1141,7 +1374,7 @@ function drawAll(){
     drawPoint(ctxRob, pt, 4.6*s1.dpr, 'rgba(184,188,196,.9)', s1.dpr, true);   // 理论（空心）
     drawPoint(ctxRob, pa, 3.8*s1.dpr, errColor(r.per_point[i]), s1.dpr, false); // 实际（实心）
     ctxRob.fillStyle='rgba(184,188,196,.8)';
-    ctxRob.fillText('P'+(i+1), pa[0]+8*s1.dpr, pa[1]-7*s1.dpr);
+    ctxRob.fillText(LBL(i), pa[0]+8*s1.dpr, pa[1]-7*s1.dpr);
   });
 
   /* ---- 右视图：基坐标系（真实坐标）—— 三坐标测量(基准) vs 机器人点回算(误差着色) ---- */
@@ -1160,7 +1393,7 @@ function drawAll(){
     drawPoint(ctxBas, pb, 3.4*s2.dpr, '#5FA8C7', s2.dpr, false);                 // 三坐标测量（实际基准）
     drawPoint(ctxBas, pa, 3.0*s2.dpr, errColor(r.per_point[i]), s2.dpr, false);   // 机器人点回算
     ctxBas.fillStyle='rgba(184,188,196,.8)';
-    ctxBas.fillText('P'+(i+1), pb[0]+7*s2.dpr, pb[1]-6*s2.dpr);
+    ctxBas.fillText(LBL(i), pb[0]+7*s2.dpr, pb[1]-6*s2.dpr);
     ctxBas.fillStyle=errColor(r.per_point[i]);
     ctxBas.fillText(r.per_point[i].toFixed(3), pa[0]+7*s2.dpr, pa[1]+12*s2.dpr);
   });
