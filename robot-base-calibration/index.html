@@ -1,0 +1,898 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>坐标变换计算 · 机器人 Base 标定演示</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wght@12..96,300;12..96,500;12..96,700&family=Space+Mono:wght@400;700&display=swap" rel="stylesheet">
+<style>
+:root{
+  --bg:#0A0B0D; --panel:#121316; --panel-2:#17191D; --border:#262A31;
+  --signal:#FF9E40; --pass:#5FA8C7; --warn:#D9A24A; --fail:#D85C46;
+  --text:#FBFBFB; --muted:#B8BCC4; --faint:#69707A;
+  --mono:'Space Mono',ui-monospace,'Cascadia Mono',Consolas,'PingFang SC','Microsoft YaHei',monospace;
+  --sans:'Bricolage Grotesque',-apple-system,'PingFang SC','Microsoft YaHei','Noto Sans SC',sans-serif;
+  --ease-reveal:cubic-bezier(0.22,1,0.36,1);
+}
+*{margin:0;padding:0;box-sizing:border-box}
+html{scroll-behavior:smooth}
+body{
+  background:var(--bg); color:var(--text); font-family:var(--sans);
+  font-weight:300; min-height:100vh; overflow-x:hidden;
+}
+/* 工程网格底纹：缓慢平移 */
+body::before{
+  content:''; position:fixed; inset:-60px; z-index:0; pointer-events:none;
+  background-image:
+    linear-gradient(rgba(95,168,199,.045) 1px,transparent 1px),
+    linear-gradient(90deg,rgba(95,168,199,.045) 1px,transparent 1px);
+  background-size:44px 44px;
+  animation:gridpan 38s linear infinite;
+}
+@keyframes gridpan{from{transform:translate(0,0)}to{transform:translate(44px,44px)}}
+::selection{background:rgba(255,158,64,.28)}
+::-webkit-scrollbar{width:10px;height:10px}
+::-webkit-scrollbar-track{background:var(--bg)}
+::-webkit-scrollbar-thumb{background:#2A2E36;border-radius:5px;border:2px solid var(--bg)}
+::-webkit-scrollbar-thumb:hover{background:#3A3F49}
+
+/* ---------- 顶栏 ---------- */
+header{
+  position:sticky; top:0; z-index:50;
+  display:flex; align-items:center; justify-content:space-between;
+  padding:14px 28px; border-bottom:1px solid var(--border);
+  background:rgba(10,11,13,.78); backdrop-filter:blur(14px);
+}
+.brand{display:flex; align-items:baseline; gap:14px}
+.brand h1{
+  font-size:19px; font-weight:700; letter-spacing:-.02em;
+}
+.brand h1 em{font-style:normal; color:var(--signal)}
+.brand .sub{font-family:var(--mono); font-size:11px; color:var(--faint); letter-spacing:.08em}
+.pill{
+  display:flex; align-items:center; gap:8px;
+  font-family:var(--mono); font-size:11px; color:var(--muted);
+  border:1px solid var(--border); border-radius:999px; padding:6px 14px;
+  background:var(--panel);
+}
+.pill .dot{width:7px;height:7px;border-radius:50%;background:var(--warn);animation:pulse 1.6s ease-in-out infinite}
+.pill.ready .dot{background:var(--pass)}
+.pill.error .dot{background:var(--fail);animation:none}
+@keyframes pulse{0%,100%{opacity:1}50%{opacity:.25}}
+
+/* ---------- 主布局 ---------- */
+main{
+  position:relative; z-index:1;
+  display:grid; grid-template-columns:400px minmax(0,1fr);
+  gap:26px; padding:26px 28px 60px; max-width:1560px; margin:0 auto;
+}
+@media (max-width:1020px){ main{grid-template-columns:1fr} }
+
+.marker{
+  font-family:var(--mono); font-size:11px; letter-spacing:.22em;
+  color:var(--signal); margin-bottom:10px; text-transform:uppercase;
+}
+.marker::after{content:''; display:inline-block; width:52px; height:1px; background:var(--border); margin-left:12px; vertical-align:middle}
+
+section.panel{
+  background:var(--panel); border:1px solid var(--border); border-radius:12px;
+  padding:22px; margin-bottom:24px;
+}
+.reveal{opacity:0; transform:translateY(18px); animation:reveal .8s var(--ease-reveal) forwards}
+@keyframes reveal{to{opacity:1;transform:none}}
+
+/* ---------- 左列：输入 ---------- */
+.ctrl{position:sticky; top:86px; align-self:start}
+@media (max-width:1020px){ .ctrl{position:static} }
+.field-label{
+  font-family:var(--mono); font-size:10px; letter-spacing:.16em;
+  color:var(--faint); margin:18px 0 8px; text-transform:uppercase;
+}
+.field-label:first-child{margin-top:0}
+.chips{display:flex; gap:8px}
+.chip{
+  flex:1; display:flex; align-items:center; justify-content:center; gap:8px;
+  font-family:var(--mono); font-size:12px; color:var(--muted);
+  border:1px solid var(--border); border-radius:999px; padding:9px 6px;
+  cursor:pointer; background:transparent; transition:all .25s var(--ease-reveal);
+}
+.chip .cdot{width:6px;height:6px;border-radius:50%;background:var(--faint);transition:all .25s}
+.chip:hover{border-color:#3A3F49; color:var(--text)}
+.chip.active{color:var(--signal); border-color:rgba(255,158,64,.55); box-shadow:0 0 14px rgba(255,158,64,.14)}
+.chip.active .cdot{background:var(--signal); animation:pulse 1.8s ease-in-out infinite}
+textarea{
+  width:100%; height:150px; resize:vertical;
+  background:var(--bg); color:var(--muted);
+  border:1px solid var(--border); border-radius:8px;
+  font-family:var(--mono); font-size:11px; line-height:1.65;
+  padding:12px 14px; outline:none; transition:border-color .25s;
+  tab-size:4; white-space:pre; overflow:auto;
+}
+textarea:focus{border-color:rgba(255,158,64,.5); color:var(--text)}
+.btnrow{display:flex; gap:8px; margin-top:8px}
+.btn{
+  font-family:var(--mono); font-size:11px; letter-spacing:.06em;
+  border:1px solid var(--border); border-radius:8px;
+  background:transparent; color:var(--muted);
+  padding:8px 14px; cursor:pointer; transition:all .25s;
+  display:inline-flex; align-items:center; gap:7px;
+}
+.btn:hover{color:var(--text); border-color:#3A3F49}
+.btn svg{width:13px;height:13px;stroke:currentColor;fill:none;stroke-width:1.5}
+.btn-run{
+  width:100%; margin-top:22px; padding:15px;
+  justify-content:center; font-size:13px; font-weight:700;
+  color:#0A0B0D; background:var(--signal); border:none; border-radius:10px;
+  animation:breathe 3.4s ease-in-out infinite;
+}
+.btn-run:hover{color:#0A0B0D; background:#FFB066; transform:translateY(-1px)}
+.btn-run:disabled{background:#2A2E36; color:var(--faint); animation:none; cursor:not-allowed; transform:none}
+@keyframes breathe{0%,100%{box-shadow:0 0 12px rgba(255,158,64,.18)}50%{box-shadow:0 0 30px rgba(255,158,64,.4)}}
+.chk{
+  display:flex; align-items:center; gap:8px; margin-top:10px;
+  font-family:var(--mono); font-size:11px; color:var(--faint); cursor:pointer;
+}
+.chk input{accent-color:var(--signal); cursor:pointer}
+.hint{font-size:11px; color:var(--faint); line-height:1.8; margin-top:14px}
+.hint b{color:var(--muted); font-weight:500}
+
+/* ---------- 结果卡片 ---------- */
+.res-grid{display:grid; grid-template-columns:repeat(auto-fit,minmax(210px,1fr)); gap:14px}
+.rcard{
+  background:var(--panel-2); border:1px solid var(--border); border-radius:10px;
+  padding:16px 18px; position:relative; overflow:hidden; transition:border-color .3s;
+}
+.rcard:hover{border-color:rgba(255,158,64,.4)}
+.rcard .rk{font-family:var(--mono); font-size:10px; letter-spacing:.18em; color:var(--faint); text-transform:uppercase}
+.rcard .rv{font-family:var(--mono); font-size:24px; font-weight:700; margin-top:8px; letter-spacing:-.02em}
+.rcard .rv small{font-size:11px; color:var(--faint); font-weight:400; margin-left:5px}
+.rcard.tri .rv{font-size:15px; line-height:2}
+.rcard.tri .rv span{display:flex; justify-content:space-between; gap:14px}
+.rcard.tri .rv i{font-style:normal; color:var(--faint); font-size:10px; letter-spacing:.14em; align-self:center}
+.quat .rv{font-size:16px; line-height:2}
+.statusline{display:flex; align-items:center; gap:12px; margin-top:18px; flex-wrap:wrap}
+.badge{
+  font-family:var(--mono); font-size:12px; font-weight:700; letter-spacing:.1em;
+  padding:7px 16px; border-radius:6px;
+}
+.badge.ok{color:var(--pass); border:1px solid rgba(95,168,199,.5); background:rgba(95,168,199,.08)}
+.badge.bad{color:var(--fail); border:1px solid rgba(216,92,70,.55); background:rgba(216,92,70,.1); animation:pulse 1.4s ease-in-out infinite}
+.statnote{font-family:var(--mono); font-size:11px; color:var(--faint)}
+
+pre.mat{
+  font-family:var(--mono); font-size:12.5px; line-height:1.9; color:var(--muted);
+  background:var(--bg); border:1px solid var(--border); border-radius:8px;
+  padding:14px 18px; overflow-x:auto; margin-top:14px;
+}
+pre.mat b{color:var(--signal); font-weight:700}
+
+/* ---------- 误差表 ---------- */
+table.err{width:100%; border-collapse:collapse; font-family:var(--mono); font-size:12px}
+table.err th{
+  text-align:right; font-weight:400; font-size:10px; letter-spacing:.14em;
+  color:var(--faint); padding:8px 10px; border-bottom:1px solid var(--border);
+  text-transform:uppercase;
+}
+table.err th:first-child, table.err td:first-child{text-align:left}
+table.err td{padding:8px 10px; border-bottom:1px solid #1B1E24; color:var(--muted); text-align:right}
+table.err tr:last-child td{border-bottom:none}
+table.err td.hot{color:var(--fail); font-weight:700}
+.errbar{height:5px; border-radius:3px; background:#1E222A; position:relative; min-width:90px}
+.errbar i{position:absolute; inset:0 auto 0 0; border-radius:3px; background:var(--pass); transition:width 1s var(--ease-reveal)}
+.errbar i.hot{background:var(--fail)}
+
+/* ---------- 3D 视图 ---------- */
+.dualview{display:grid; grid-template-columns:1fr 1fr; gap:14px}
+@media (max-width:760px){ .dualview{grid-template-columns:1fr} }
+.viewbox{position:relative}
+.viewtitle{
+  font-family:var(--mono); font-size:10px; letter-spacing:.14em; color:var(--faint);
+  text-transform:uppercase; margin-bottom:8px;
+}
+canvas.view3d{
+  width:100%; height:360px; display:block; border-radius:10px;
+  background:radial-gradient(ellipse at 50% 40%, #14161B 0%, #0A0B0D 75%);
+  border:1px solid var(--border); cursor:grab;
+}
+canvas.view3d:active{cursor:grabbing}
+.legendbar{
+  display:flex; gap:20px; flex-wrap:wrap; margin-top:12px;
+  font-family:var(--mono); font-size:10.5px; color:var(--faint); align-items:center;
+}
+.legendbar span{display:flex; align-items:center; gap:6px}
+.legendbar i{width:8px; height:8px; border-radius:50%; display:inline-block}
+.legendbar i.dot-grad{background:linear-gradient(90deg,#5FA8C7,#D9A24A,#D85C46)}
+.viewhint-inline{margin-left:auto; color:#3D434E}
+
+/* ---------- 源码 ---------- */
+details.src summary{
+  cursor:pointer; font-family:var(--mono); font-size:11px; letter-spacing:.14em;
+  color:var(--faint); text-transform:uppercase; list-style:none; display:flex; align-items:center; gap:10px;
+}
+details.src summary::-webkit-details-marker{display:none}
+details.src summary::before{content:'▸'; color:var(--signal); transition:transform .3s}
+details.src[open] summary::before{transform:rotate(90deg)}
+pre.code{
+  margin-top:16px; font-family:var(--mono); font-size:11.5px; line-height:1.75;
+  background:var(--bg); border:1px solid var(--border); border-radius:8px;
+  padding:18px 20px; overflow:auto; max-height:440px; color:var(--muted);
+}
+.empty{
+  border:1px dashed var(--border); border-radius:10px; padding:34px;
+  text-align:center; color:var(--faint); font-family:var(--mono); font-size:12px; line-height:2;
+}
+@media (prefers-reduced-motion:reduce){
+  *,*::before,*::after{animation-duration:.01ms !important; animation-iteration-count:1 !important; transition-duration:.01ms !important}
+}
+</style>
+</head>
+<body>
+<header>
+  <div class="brand">
+    <h1>坐标变换计算 <em>Base 标定</em></h1>
+    <span class="sub">SVD 最小二乘刚体变换 · Python / NumPy 引擎</span>
+  </div>
+  <div class="pill" id="enginePill"><span class="dot"></span><span id="engineText">Python 引擎加载中…</span></div>
+</header>
+
+<main>
+  <!-- ================= 左列：输入 ================= -->
+  <div class="ctrl">
+    <section class="panel reveal" style="animation-delay:.05s">
+      <div class="marker">01 / 数据输入</div>
+
+      <div class="field-label">机器人类型</div>
+      <div class="chips" id="robotChips">
+        <button class="chip active" data-r="KUKA"><span class="cdot"></span>KUKA ·dat</button>
+        <button class="chip" data-r="FANUC"><span class="cdot"></span>FANUC ·ls</button>
+        <button class="chip" data-r="ABB"><span class="cdot"></span>ABB ·mod</button>
+      </div>
+
+      <div class="field-label">机器人点位文件（TCP 示教点）</div>
+      <textarea id="robotText" spellcheck="false" placeholder="粘贴机器人程序内容，或点击「载入示例」"></textarea>
+      <div class="btnrow">
+        <button class="btn" id="btnRobotFile"><svg viewBox="0 0 24 24"><path d="M12 16V4m0 0l-4 4m4-4l4 4M4 20h16"/></svg>选择文件</button>
+        <button class="btn" id="btnRobotSample"><svg viewBox="0 0 24 24"><path d="M4 6h16M4 12h16M4 18h10"/></svg>载入示例</button>
+        <input type="file" id="robotFile" accept=".dat,.ls,.mod,.txt" hidden>
+      </div>
+      <label class="chk"><input type="checkbox" id="chkOutlier">示例数据注入 2mm 超差点（P4）</label>
+
+      <div class="field-label">三坐标测量文件（.txt，逗号分隔）</div>
+      <textarea id="baseText" spellcheck="false" placeholder="点号,X坐标,Y坐标,Z坐标"></textarea>
+      <div class="btnrow">
+        <button class="btn" id="btnBaseFile"><svg viewBox="0 0 24 24"><path d="M12 16V4m0 0l-4 4m4-4l4 4M4 20h16"/></svg>选择文件</button>
+        <button class="btn" id="btnBaseSample"><svg viewBox="0 0 24 24"><path d="M4 6h16M4 12h16M4 18h10"/></svg>载入示例</button>
+        <input type="file" id="baseFile" accept=".txt,.csv" hidden>
+      </div>
+
+      <button class="btn btn-run" id="btnRun" disabled>开始计算 →</button>
+      <div class="hint">
+        算法流程：<b>解析点位</b> → 质心对齐 → 协方差矩阵 <b>H = AAᵀ·BB</b> →
+        <b>SVD 分解</b> 求旋转 R（反射修正）→ 平移 <b>t = −R·μA + μB</b> →
+        欧拉角 / OAT / 四元数 → 逐点残差。<br>
+        全部计算由浏览器内嵌的 <b>Python + NumPy</b> 完成（Pyodide / WebAssembly）。
+      </div>
+    </section>
+  </div>
+
+  <!-- ================= 右列：结果 ================= -->
+  <div>
+    <section class="panel reveal" style="animation-delay:.12s" id="secResult">
+      <div class="marker">02 / 变换结果</div>
+      <div class="empty" id="resultEmpty">等待计算 —— 请在左侧载入数据后点击「开始计算」<br>机器人坐标系 ⇐ 基坐标系的刚体变换将显示在这里</div>
+      <div id="resultBody" hidden>
+        <div class="res-grid">
+          <div class="rcard tri">
+            <div class="rk">平移向量 T / mm</div>
+            <div class="rv">
+              <span><i>X</i><b id="tx">—</b></span>
+              <span><i>Y</i><b id="ty">—</b></span>
+              <span><i>Z</i><b id="tz">—</b></span>
+            </div>
+          </div>
+          <div class="rcard tri">
+            <div class="rk">欧拉角 Rx Ry Rz / °</div>
+            <div class="rv">
+              <span><i>Rx</i><b id="rx">—</b></span>
+              <span><i>Ry</i><b id="ry">—</b></span>
+              <span><i>Rz</i><b id="rz">—</b></span>
+            </div>
+          </div>
+          <div class="rcard tri">
+            <div class="rk">KUKA O A T / °</div>
+            <div class="rv">
+              <span><i>O</i><b id="ro">—</b></span>
+              <span><i>A</i><b id="ra">—</b></span>
+              <span><i>T</i><b id="rt">—</b></span>
+            </div>
+          </div>
+          <div class="rcard quat">
+            <div class="rk">四元数 q1 q2 q3 q4</div>
+            <div class="rv" id="quat">—</div>
+          </div>
+        </div>
+        <pre class="mat" id="rmat"></pre>
+        <div class="statusline">
+          <span class="badge ok" id="errBadge">—</span>
+          <span class="statnote" id="errNote"></span>
+          <span style="flex:1"></span>
+          <button class="btn" id="btnSave"><svg viewBox="0 0 24 24"><path d="M12 4v12m0 0l-4-4m4 4l4-4M4 20h16"/></svg>保存结果 .txt</button>
+        </div>
+      </div>
+    </section>
+
+    <section class="panel reveal" style="animation-delay:.19s" id="secErr" hidden>
+      <div class="marker">03 / 误差分析</div>
+      <table class="err">
+        <thead><tr>
+          <th>点号</th><th>dX / mm</th><th>dY / mm</th><th>dZ / mm</th><th>|d| / mm</th><th style="width:26%"></th>
+        </tr></thead>
+        <tbody id="errRows"></tbody>
+      </table>
+    </section>
+
+    <section class="panel reveal" style="animation-delay:.26s" id="secView" hidden>
+      <div class="marker">04 / 空间视图 · 双坐标系误差对比</div>
+      <div class="dualview">
+        <div class="viewbox">
+          <div class="viewtitle">机器人坐标系 · 原始示教点</div>
+          <canvas id="viewRob" class="view3d"></canvas>
+        </div>
+        <div class="viewbox">
+          <div class="viewtitle">基坐标系叠加 · 三坐标测量点 vs 变换后机器人点</div>
+          <canvas id="viewBase" class="view3d"></canvas>
+        </div>
+      </div>
+      <div class="legendbar">
+        <span><i style="background:#5FA8C7"></i>三坐标测量点（基准）</span>
+        <span><i class="dot-grad"></i>机器人点 · 颜色 = 配准误差（青 &lt;0.5mm · 黄 0.5–1mm · 红 &gt;1mm）</span>
+        <span><i style="background:#D85C46"></i><span id="resLegend">残差连线</span></span>
+        <span class="viewhint-inline">拖动任一视图旋转 · 滚轮缩放（两视图联动）</span>
+      </div>
+    </section>
+
+    <section class="panel reveal" style="animation-delay:.33s">
+      <div class="marker">05 / 算法源码</div>
+      <details class="src">
+        <summary>查看在浏览器中实际执行的 Python 代码（优化版 ParameterCalculate）</summary>
+        <pre class="code" id="srcView"></pre>
+      </details>
+    </section>
+  </div>
+</main>
+<!-- ================= 内嵌 Python 算法引擎 ================= -->
+<script type="text/x-python" id="pySrc">
+# -*- coding: utf-8 -*-
+# 优化版 ParameterCalculate —— 三维刚体配准（SVD / Kabsch）
+# 约定：rob ≈ R @ base + t（列向量），R 正交且 det(R)=+1，四元数 (w,x,y,z)
+import re, math, json
+import numpy as np
+
+# ---------- 点位文件解析（对应 run.py 的三种机器人格式） ----------
+def parse_robot_data(text, robot_type):
+    data = []
+    for line in text.splitlines():
+        if robot_type in ('KUKA', 'FANUC'):
+            b = re.split(r'[\s{}=,]', line)
+            if len(b) > 1 and b[1]:
+                if robot_type == 'KUKA' and b[1] == 'E6POS':
+                    data.append([float(b[5]), float(b[7]), float(b[9])])
+                elif robot_type == 'FANUC' and b[1] == 'X':
+                    data.append([float(b[5]), float(b[14]), float(b[22])])
+        else:  # ABB: MoveL / MoveP
+            a = line.split()
+            if a and a[0] in ('MoveL', 'MoveP'):
+                tok = a[1].replace(']', '').replace('[', '')
+                b = tok.split(',')
+                if len(b) > 10:
+                    data.append([float(b[0]), float(b[1]), float(b[2])])
+    return np.array(data)
+
+def parse_base_data(text):
+    data = []
+    for line in text.splitlines():
+        if len(line) > 10:
+            b = re.split(r'[,]', line)
+            if len(b) > 3 and b[1] and b[2] and b[3]:
+                try:
+                    data.append([float(b[1]), float(b[2]), float(b[3])])
+                except ValueError:
+                    pass  # 跳过表头行
+    return np.array(data)
+
+# ---------- 1. 刚体配准：SVD 求最优 R, t ----------
+def rigid_transform_3D(source, target):
+    # min Σ||R·source_i + t − target_i||², 约束 RᵀR=I, det(R)=+1
+    mu_s = source.mean(axis=0)     # 源点集质心
+    mu_t = target.mean(axis=0)     # 目标点集质心
+    S = source - mu_s              # 去质心：消掉平移，只剩旋转
+    T = target - mu_t
+    H = S.T @ T                    # 互协方差矩阵
+    U, s, Vt = np.linalg.svd(H)    # SVD 分解
+    R = Vt.T @ U.T
+    if np.linalg.det(R) < 0:       # 反射修正：剔除镜像，保证真旋转
+        Vt[2, :] *= -1
+        R = Vt.T @ U.T
+    t = mu_t - R @ mu_s            # 由 mu_t = R·mu_s + t 解出平移
+    return R, t
+
+# ---------- 2. 旋转矩阵 -> 欧拉角（XYZ 与 KUKA OAT 两套，含万向锁处理）----------
+def rotation_matrix_to_euler(R):
+    Rx = math.degrees(math.atan2(R[2, 1], R[2, 2]))
+    Ry = math.degrees(math.atan2(-R[2, 0], math.sqrt(R[2, 1]**2 + R[2, 2]**2)))
+    Rz = math.degrees(math.atan2(R[1, 0], R[0, 0]))
+    xyz = [Rx, Ry, Rz]
+    sinA = math.sqrt(R[2, 0]**2 + R[2, 1]**2)
+    if sinA < 1e-12:               # 万向锁：A ≈ 0°/180°，O 与 T 耦合，令 O=0
+        A = math.degrees(math.atan2(sinA, R[2, 2]))
+        O = 0.0
+        T = math.degrees(math.atan2(-R[0, 1], R[1, 1]))
+    else:
+        A  = math.degrees(math.atan2(sinA, R[2, 2]))
+        sA = math.sin(math.radians(A))
+        O  = math.degrees(math.atan2(R[1, 2] / sA,  R[0, 2] / sA))
+        T  = math.degrees(math.atan2(R[2, 1] / sA, -R[2, 0] / sA))
+    return xyz, [O, A, T]
+
+# ---------- 3. 旋转矩阵 -> 四元数（Shepperd 方法 + 归一化）----------
+def quaternion_calculator(R):
+    four_sq = [R[0,0]+R[1,1]+R[2,2], R[0,0]-R[1,1]-R[2,2],
+               R[1,1]-R[0,0]-R[2,2], R[2,2]-R[0,0]-R[1,1]]
+    idx = four_sq.index(max(four_sq))   # 选最大分量，避免除以接近 0 的数
+    biggest = math.sqrt(four_sq[idx] + 1.0) * 0.5
+    mult = 4.0 * biggest
+    if idx == 0:
+        w = biggest; x = (R[2,1]-R[1,2])/mult; y = (R[0,2]-R[2,0])/mult; z = (R[1,0]-R[0,1])/mult
+    elif idx == 1:
+        w = (R[2,1]-R[1,2])/mult; x = biggest; y = (R[1,0]+R[0,1])/mult; z = (R[0,2]+R[2,0])/mult
+    elif idx == 2:
+        w = (R[0,2]-R[2,0])/mult; x = (R[1,0]+R[0,1])/mult; y = biggest; z = (R[2,1]+R[1,2])/mult
+    else:
+        w = (R[1,0]-R[0,1])/mult; x = (R[0,2]+R[2,0])/mult; y = (R[2,1]+R[1,2])/mult; z = biggest
+    q = np.array([w, x, y, z])
+    q /= np.linalg.norm(q)              # 归一化，消除数值误差
+    return q.tolist()
+
+# ---------- 4. 误差：残差向量 / 逐点范数 / RMSE / MAE ----------
+def error_calculation(source, target, R, t):
+    pred = (R @ source.T).T + t         # 预测值 R·source + t
+    err_vec = target - pred             # 残差向量
+    per_point = np.linalg.norm(err_vec, axis=1)
+    rmse = float(np.sqrt(np.mean(per_point**2)))
+    mae  = float(np.mean(per_point))
+    return err_vec, per_point, rmse, mae
+
+def run_calculation(robot_text, base_text, robot_type):
+    rob  = parse_robot_data(robot_text, robot_type)
+    base = parse_base_data(base_text)
+    if len(rob) == 0 or len(base) == 0:
+        return json.dumps({'ok': False, 'message': '未能从文件中解析出点位，请检查文件格式与机器人类型是否匹配'})
+    if len(rob) != len(base):
+        return json.dumps({'ok': False, 'message': '选择的文件中点位不等：机器人 %d 点 / 三坐标 %d 点' % (len(rob), len(base))})
+    if len(rob) < 3:
+        return json.dumps({'ok': False, 'message': '测量点至少为三点'})
+    R, t = rigid_transform_3D(base, rob)        # rob ≈ R @ base + t
+    euler, oat = rotation_matrix_to_euler(R)
+    quat = quaternion_calculator(R)
+    err, per_point, rmse, mae = error_calculation(base, rob, R, t)
+    aligned = (R.T @ (rob - t).T).T             # 机器人点回算到基坐标系，用于可视化
+    return json.dumps({
+        'ok': True, 'n': int(len(rob)),
+        't': t.tolist(), 'R': R.tolist(),
+        'euler': euler, 'oat': oat, 'quat': quat,
+        'err': err.tolist(), 'per_point': per_point.tolist(),
+        'rmse': rmse, 'mae': mae,
+        'max_abs': float(np.abs(err).max()),
+        'base': base.tolist(), 'rob': rob.tolist(), 'aligned': aligned.tolist(),
+    })
+</script>
+<script src="https://cdn.jsdelivr.net/pyodide/v0.26.4/full/pyodide.js"></script>
+<script>
+/* ================= 内置示例数据（与算法联调验证过） ================= */
+const SAMPLE_BASE = `点号,X坐标,Y坐标,Z坐标
+P1,164.374,-36.673,215.159
+P2,118.421,-243.494,285.373
+P3,156.684,171.639,-223.132
+P4,-29.768,-77.521,256.059
+P5,86.319,193.657,-33.951
+P6,-163.657,32.751,-261.710
+P7,196.579,78.999,154.853`;
+
+const SAMPLE_ROBOT = {
+KUKA: `&ACCESS RVP
+&REL 1
+DEFDAT  demo_prog
+DECL BASISTECH DAT_BAS  basistech_dat[]
+DECL E6POS XP1={X 301.597,Y -138.044,Z 627.122,A 12.34,B 5.67,C -8.9,S 2,T 3,E1 0.0,E2 0.0,E3 0.0,E4 0.0,E5 0.0,E6 0.0}
+DECL E6POS XP2={X 224.281,Y -322.962,Z 725.394,A 12.34,B 5.67,C -8.9,S 2,T 3,E1 0.0,E2 0.0,E3 0.0,E4 0.0,E5 0.0,E6 0.0}
+DECL E6POS XP3={X 276.060,Y 28.255,Z 171.900,A 12.34,B 5.67,C -8.9,S 2,T 3,E1 0.0,E2 0.0,E3 0.0,E4 0.0,E5 0.0,E6 0.0}
+DECL E6POS XP4={X 110.885,Y -131.732,Z 694.933,A 12.34,B 5.67,C -8.9,S 2,T 3,E1 0.0,E2 0.0,E3 0.0,E4 0.0,E5 0.0,E6 0.0}
+DECL E6POS XP5={X 238.741,Y 81.395,Z 364.296,A 12.34,B 5.67,C -8.9,S 2,T 3,E1 0.0,E2 0.0,E3 0.0,E4 0.0,E5 0.0,E6 0.0}
+DECL E6POS XP6={X -68.205,Y -39.935,Z 187.299,A 12.34,B 5.67,C -8.9,S 2,T 3,E1 0.0,E2 0.0,E3 0.0,E4 0.0,E5 0.0,E6 0.0}
+DECL E6POS XP7={X 348.241,Y -37.889,Z 550.665,A 12.34,B 5.67,C -8.9,S 2,T 3,E1 0.0,E2 0.0,E3 0.0,E4 0.0,E5 0.0,E6 0.0}
+ENDDAT`,
+FANUC: `/MN
+   1:  J P[1] 100% FINE    ;
+   2:  L P[2] 500mm/sec FINE    ;
+/POS
+P[1]{
+   GP1:
+	UF : 0, UT : 1,		CONFIG : 'N U T, 0, 0, 0',
+	X =  301.597 mm,  	Y =  -138.044 mm,		Z =  627.122 mm,
+	W =   12.340 deg,	P =    5.670 deg,	R =   -8.900 deg
+};
+P[2]{
+   GP1:
+	UF : 0, UT : 1,		CONFIG : 'N U T, 0, 0, 0',
+	X =  224.281 mm,  	Y =  -322.962 mm,		Z =  725.394 mm,
+	W =   12.340 deg,	P =    5.670 deg,	R =   -8.900 deg
+};
+P[3]{
+   GP1:
+	UF : 0, UT : 1,		CONFIG : 'N U T, 0, 0, 0',
+	X =  276.060 mm,  	Y =  28.255 mm,		Z =  171.900 mm,
+	W =   12.340 deg,	P =    5.670 deg,	R =   -8.900 deg
+};
+P[4]{
+   GP1:
+	UF : 0, UT : 1,		CONFIG : 'N U T, 0, 0, 0',
+	X =  110.885 mm,  	Y =  -131.732 mm,		Z =  694.933 mm,
+	W =   12.340 deg,	P =    5.670 deg,	R =   -8.900 deg
+};
+P[5]{
+   GP1:
+	UF : 0, UT : 1,		CONFIG : 'N U T, 0, 0, 0',
+	X =  238.741 mm,  	Y =  81.395 mm,		Z =  364.296 mm,
+	W =   12.340 deg,	P =    5.670 deg,	R =   -8.900 deg
+};
+P[6]{
+   GP1:
+	UF : 0, UT : 1,		CONFIG : 'N U T, 0, 0, 0',
+	X =  -68.205 mm,  	Y =  -39.935 mm,		Z =  187.299 mm,
+	W =   12.340 deg,	P =    5.670 deg,	R =   -8.900 deg
+};
+P[7]{
+   GP1:
+	UF : 0, UT : 1,		CONFIG : 'N U T, 0, 0, 0',
+	X =  348.241 mm,  	Y =  -37.889 mm,		Z =  550.665 mm,
+	W =   12.340 deg,	P =    5.670 deg,	R =   -8.900 deg
+};
+/END`,
+ABB: `MODULE DemoModule
+  PROC main()
+    MoveL [[301.597,-138.044,627.122],[0.12,0.68,0.71,0.10],[0,0,0,0],[9E9,9E9,9E9,9E9,9E9,9E9]], v200, fine, tool0;
+    MoveL [[224.281,-322.962,725.394],[0.12,0.68,0.71,0.10],[0,0,0,0],[9E9,9E9,9E9,9E9,9E9,9E9]], v200, fine, tool0;
+    MoveL [[276.060,28.255,171.900],[0.12,0.68,0.71,0.10],[0,0,0,0],[9E9,9E9,9E9,9E9,9E9,9E9]], v200, fine, tool0;
+    MoveL [[110.885,-131.732,694.933],[0.12,0.68,0.71,0.10],[0,0,0,0],[9E9,9E9,9E9,9E9,9E9,9E9]], v200, fine, tool0;
+    MoveL [[238.741,81.395,364.296],[0.12,0.68,0.71,0.10],[0,0,0,0],[9E9,9E9,9E9,9E9,9E9,9E9]], v200, fine, tool0;
+    MoveL [[-68.205,-39.935,187.299],[0.12,0.68,0.71,0.10],[0,0,0,0],[9E9,9E9,9E9,9E9,9E9,9E9]], v200, fine, tool0;
+    MoveL [[348.241,-37.889,550.665],[0.12,0.68,0.71,0.10],[0,0,0,0],[9E9,9E9,9E9,9E9,9E9,9E9]], v200, fine, tool0;
+  ENDPROC
+ENDMODULE`
+};
+
+/* ================= 状态 ================= */
+let pyodide = null, robotType = 'KUKA', lastResult = null;
+const $ = id => document.getElementById(id);
+
+/* ================= Python 引擎加载 ================= */
+async function bootEngine(){
+  try{
+    pyodide = await loadPyodide({indexURL:'https://cdn.jsdelivr.net/pyodide/v0.26.4/full/'});
+    $('engineText').textContent = '加载 NumPy 中…';
+    await pyodide.loadPackage('numpy');
+    pyodide.runPython($('pySrc').textContent);
+    $('enginePill').classList.add('ready');
+    $('engineText').textContent = 'Python 引擎就绪 · NumPy ' + pyodide.runPython('import numpy; numpy.__version__');
+    $('btnRun').disabled = false;
+    // 自动载入示例，便于一键演示
+    $('robotText').value = SAMPLE_ROBOT[robotType];
+    $('baseText').value  = SAMPLE_BASE;
+  }catch(e){
+    $('enginePill').classList.add('error');
+    $('engineText').textContent = '引擎加载失败：请检查网络（需访问 cdn.jsdelivr.net）';
+  }
+}
+bootEngine();
+
+/* 源码展示 */
+$('srcView').textContent = $('pySrc').textContent.trim();
+
+/* ================= 交互 ================= */
+$('robotChips').addEventListener('click', e=>{
+  const chip = e.target.closest('.chip'); if(!chip) return;
+  document.querySelectorAll('.chip').forEach(c=>c.classList.remove('active'));
+  chip.classList.add('active');
+  robotType = chip.dataset.r;
+});
+function bindFile(btnId, inputId, target){
+  $(btnId).onclick = ()=>$(inputId).click();
+  $(inputId).onchange = e=>{
+    const f = e.target.files[0]; if(!f) return;
+    const rd = new FileReader();
+    rd.onload = ()=>{ $(target).value = rd.result; };
+    rd.readAsText(f);
+    e.target.value = '';
+  };
+}
+bindFile('btnRobotFile','robotFile','robotText');
+bindFile('btnBaseFile','baseFile','baseText');
+function currentRobotSample(){
+  let s = SAMPLE_ROBOT[robotType];
+  if($('chkOutlier').checked) s = s.replace('110.885', '112.885');  // P4 的 X 注入 +2mm
+  return s;
+}
+$('btnRobotSample').onclick = ()=>{ $('robotText').value = currentRobotSample(); };
+$('chkOutlier').onchange = ()=>{
+  $('robotText').value = currentRobotSample();
+  if(pyodide && $('baseText').value.trim()) $('btnRun').click();
+};
+$('btnBaseSample').onclick  = ()=>{ $('baseText').value  = SAMPLE_BASE; };
+
+const fmt = (x,d=4)=> (x>=0?' ':'') + Number(x).toFixed(d);
+
+/* ================= 运行计算 ================= */
+$('btnRun').onclick = ()=>{
+  $('btnRun').disabled = true;
+  $('btnRun').textContent = '计算中…';
+  setTimeout(()=>{
+    try{
+      pyodide.globals.set('g_robot_text', $('robotText').value);
+      pyodide.globals.set('g_base_text',  $('baseText').value);
+      pyodide.globals.set('g_rtype', robotType);
+      const res = JSON.parse(pyodide.runPython('run_calculation(g_robot_text, g_base_text, g_rtype)'));
+      if(!res.ok){ showError(res.message); return; }
+      lastResult = res;
+      renderResult(res);
+    }catch(e){
+      showError('计算异常：' + e.message);
+    }finally{
+      $('btnRun').disabled = false;
+      $('btnRun').textContent = '开始计算 →';
+    }
+  }, 30);
+};
+
+function showError(msg){
+  $('resultEmpty').hidden = false;
+  $('resultEmpty').innerHTML = '⚠ ' + msg;
+  $('resultBody').hidden = true;
+  $('secErr').hidden = true; $('secView').hidden = true;
+}
+
+function renderResult(r){
+  $('resultEmpty').hidden = true;
+  $('resultBody').hidden = false;
+  $('secErr').hidden = false;
+  $('secView').hidden = false;
+
+  $('tx').textContent = fmt(r.t[0],3); $('ty').textContent = fmt(r.t[1],3); $('tz').textContent = fmt(r.t[2],3);
+  $('rx').textContent = fmt(r.euler[0]); $('ry').textContent = fmt(r.euler[1]); $('rz').textContent = fmt(r.euler[2]);
+  $('ro').textContent = fmt(r.oat[0]);  $('ra').textContent = fmt(r.oat[1]);  $('rt').textContent = fmt(r.oat[2]);
+  $('quat').innerHTML = r.quat.map((q,i)=>`<span style="display:flex;justify-content:space-between"><i style="font-style:normal;color:var(--faint);font-size:10px;letter-spacing:.14em">q${i+1}</i><b>${fmt(q,6)}</b></span>`).join('');
+
+  const R = r.R;
+  $('rmat').innerHTML =
+    `<b>旋转矩阵 R</b>（机器人坐标系 → 基坐标系）\n` +
+    R.map(row=>'  '+row.map(v=>fmt(v,6).padStart(11)).join('')).join('\n');
+
+  const bad = r.max_abs > 1;
+  const badge = $('errBadge');
+  badge.className = 'badge ' + (bad ? 'bad' : 'ok');
+  badge.textContent = bad ? '结果超差' : '合格';
+  $('errNote').textContent = `点位数 ${r.n} · RMSE ${r.rmse.toFixed(4)} mm · MAE ${r.mae.toFixed(4)} mm · 最大分量误差 ${r.max_abs.toFixed(4)} mm · 阈值 ±1 mm`;
+
+  /* 误差表 */
+  const maxN = Math.max(...r.per_point);
+  $('errRows').innerHTML = r.err.map((e,i)=>{
+    const n = r.per_point[i], hot = n > 1;
+    return `<tr>
+      <td>P${i+1}</td>
+      <td class="${Math.abs(e[0])>1?'hot':''}">${fmt(e[0])}</td>
+      <td class="${Math.abs(e[1])>1?'hot':''}">${fmt(e[1])}</td>
+      <td class="${Math.abs(e[2])>1?'hot':''}">${fmt(e[2])}</td>
+      <td class="${hot?'hot':''}">${n.toFixed(4)}</td>
+      <td><div class="errbar"><i class="${hot?'hot':''}" style="width:${(100*n/maxN).toFixed(1)}%"></i></div></td>
+    </tr>`;
+  }).join('');
+
+  setViewData(r);
+  ['secResult','secErr','secView'].forEach((id,i)=>{
+    const el = $(id); el.style.animation='none'; void el.offsetWidth;
+    el.style.animation=''; el.classList.remove('reveal'); void el.offsetWidth; el.classList.add('reveal');
+    el.style.animationDelay = (i*0.07)+'s';
+  });
+}
+
+/* ================= 保存结果 ================= */
+$('btnSave').onclick = ()=>{
+  if(!lastResult) return;
+  const r = lastResult;
+  const mat = a=>a.map(row=>row.map(v=>fmt(v,6).padStart(11)).join('')).join('\n');
+  const txt =
+`坐标变换计算结果（Python/NumPy 引擎）
+
+X Y Z
+  ${fmt(r.t[0],6).padStart(11)}${fmt(r.t[1],6).padStart(11)}${fmt(r.t[2],6).padStart(11)}
+
+Rx Ry Rz
+  ${r.euler.map(v=>v.toFixed(6)).join('  ')}
+
+O A T
+  ${r.oat.map(v=>v.toFixed(6)).join('  ')}
+
+q1 q2 q3 q4
+  ${r.quat.map(v=>v.toFixed(6)).join('  ')}
+
+旋转矩阵 R
+${mat(r.R)}
+
+Err (dX dY dZ / mm)
+${mat(r.err)}
+
+RMSE ${r.rmse.toFixed(6)} mm
+MAE  ${r.mae.toFixed(6)} mm
+${r.max_abs>1?'\n结果超差':''}`;
+  const blob = new Blob([txt], {type:'text/plain;charset=utf-8'});
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(blob);
+  a.download = '坐标变换计算结果.txt';
+  a.click(); URL.revokeObjectURL(a.href);
+};
+</script>
+<script>
+/* ================= 双坐标系 3D 点云视图（canvas，无依赖，两视图联动） ================= */
+const view = { yaw:-0.7, pitch:0.55, zoom:1, data:null, factor:1 };
+const cvRob = $('viewRob'),  ctxRob  = cvRob.getContext('2d');
+const cvBas = $('viewBase'), ctxBas = cvBas.getContext('2d');
+const CV_LIST = [[cvRob, ctxRob], [cvBas, ctxBas]];
+
+/* 误差 -> 颜色：<0.5mm 青，0.5~1mm 黄，>1mm 红 */
+function errColor(n){
+  const t = Math.min(1, n/1.0);
+  let c1, c2, k;
+  if(t < 0.5){ c1=[95,168,199]; c2=[217,162,74]; k=t/0.5; }
+  else       { c1=[217,162,74]; c2=[216,92,70]; k=(t-0.5)/0.5; }
+  const c = c1.map((v,i)=>Math.round(v+(c2[i]-v)*k));
+  return `rgb(${c[0]},${c[1]},${c[2]})`;
+}
+
+function setViewData(r){
+  view.data = r;
+  const maxErr = Math.max(...r.per_point, 1e-9);
+  let mn=[1e9,1e9,1e9], mx=[-1e9,-1e9,-1e9];
+  r.base.forEach(p=>p.forEach((v,i)=>{mn[i]=Math.min(mn[i],v);mx[i]=Math.max(mx[i],v);}));
+  const sceneR = Math.max(mx[0]-mn[0], mx[1]-mn[1], mx[2]-mn[2])/2 || 1;
+  view.factor = Math.max(1, (0.10*sceneR)/maxErr);
+  $('resLegend').textContent = '残差连线 ×' + (view.factor>=10?Math.round(view.factor):view.factor.toFixed(1));
+  drawAll();
+}
+
+function sizeCanvas(cv){
+  const r = cv.getBoundingClientRect(), d = window.devicePixelRatio||1;
+  cv.width = Math.max(1, r.width*d); cv.height = Math.max(1, r.height*d);
+}
+window.addEventListener('resize', ()=>{ CV_LIST.forEach(([c])=>sizeCanvas(c)); drawAll(); });
+
+/* 两视图共享视角：任一画布拖动/滚轮，两个视图同步 */
+let drag = null;
+CV_LIST.forEach(([cv])=>{
+  cv.addEventListener('pointerdown', e=>{ drag={x:e.clientX,y:e.clientY}; cv.setPointerCapture(e.pointerId); });
+  cv.addEventListener('pointermove', e=>{
+    if(!drag) return;
+    view.yaw   += (e.clientX-drag.x)*0.008;
+    view.pitch += (e.clientY-drag.y)*0.008;
+    view.pitch = Math.max(-1.45, Math.min(1.45, view.pitch));
+    drag = {x:e.clientX, y:e.clientY};
+    drawAll();
+  });
+  cv.addEventListener('pointerup', ()=>drag=null);
+  cv.addEventListener('wheel', e=>{
+    e.preventDefault();
+    view.zoom *= e.deltaY<0 ? 1.1 : 0.9;
+    view.zoom = Math.max(0.3, Math.min(5, view.zoom));
+    drawAll();
+  }, {passive:false});
+});
+
+function project(p, c, rad, scale, W, H){
+  const x=p[0]-c[0], y=p[1]-c[1], z=p[2]-c[2];
+  const cy=Math.cos(view.yaw), sy=Math.sin(view.yaw);
+  const cp=Math.cos(view.pitch), sp=Math.sin(view.pitch);
+  const X  =  x*cy + y*sy;
+  const Y  = -x*sy + y*cy;
+  const Y2 = Y*cp - z*sp;
+  const Z2 = Y*sp + z*cp;
+  const zn = Z2/(rad||1);
+  const d = 3.2, f = d/(d + zn*0.85);
+  return [W/2 + X*scale*f*view.zoom, H/2 - Y2*scale*f*view.zoom, Z2];
+}
+
+/* 通用场景绘制：floor 网格 + 坐标轴 + 点集 */
+function drawScene(ctx, cv, pts, opt){
+  sizeCanvas(cv);
+  const W=cv.width, H=cv.height, dpr=window.devicePixelRatio||1;
+  ctx.clearRect(0,0,W,H);
+  const c = [0,1,2].map(i=>pts.reduce((s,p)=>s+p[i],0)/pts.length);
+  let rad=0;
+  pts.forEach(p=>{ rad=Math.max(rad, Math.hypot(p[0]-c[0],p[1]-c[1],p[2]-c[2])); });
+  const scale = Math.min(W,H)*0.40/rad;
+
+  /* 地面网格（过最低点的水平面） */
+  const z0 = Math.min(...pts.map(p=>p[2]));
+  const gStep = rad/2.2;
+  ctx.lineWidth = 1;
+  for(let g=-3; g<=3; g++){
+    ctx.strokeStyle = g===0 ? 'rgba(95,168,199,.22)' : 'rgba(95,168,199,.08)';
+    [[ [c[0]+g*gStep, c[1]-3*gStep, z0], [c[0]+g*gStep, c[1]+3*gStep, z0] ],
+     [ [c[0]-3*gStep, c[1]+g*gStep, z0], [c[0]+3*gStep, c[1]+g*gStep, z0] ]].forEach(([a,b])=>{
+      const pa=project(a,c,rad,scale,W,H), pb=project(b,c,rad,scale,W,H);
+      ctx.beginPath(); ctx.moveTo(pa[0],pa[1]); ctx.lineTo(pb[0],pb[1]); ctx.stroke();
+    });
+  }
+  /* 坐标轴 */
+  const axis=[[rad*0.9,0,0,'#D85C46','X'],[0,rad*0.9,0,'#A2DB3C','Y'],[0,0,rad*0.9,'#5FA8C7','Z']];
+  const pc = project(c,c,rad,scale,W,H);
+  ctx.font = `${11*dpr}px "Space Mono",monospace`;
+  axis.forEach(([ax,ay,az,col,name])=>{
+    const pe = project([c[0]+ax,c[1]+ay,c[2]+az],c,rad,scale,W,H);
+    ctx.strokeStyle=col; ctx.globalAlpha=.55; ctx.lineWidth=1.4;
+    ctx.beginPath(); ctx.moveTo(pc[0],pc[1]); ctx.lineTo(pe[0],pe[1]); ctx.stroke();
+    ctx.globalAlpha=1; ctx.fillStyle=col; ctx.fillText(name, pe[0]+5, pe[1]-5);
+  });
+  return {c, rad, scale, W, H, dpr};
+}
+
+function drawAll(){
+  if(!view.data){ CV_LIST.forEach(([c])=>sizeCanvas(c)); return; }
+  const r = view.data;
+
+  /* ---- 左视图：机器人坐标系原始示教点，颜色=该点配准误差 ---- */
+  const s1 = drawScene(ctxRob, cvRob, r.rob, {});
+  r.rob.map((p,i)=>({i, d:project(p,s1.c,s1.rad,s1.scale,s1.W,s1.H)[2]}))
+       .sort((a,b)=>a.d-b.d)
+       .forEach(({i})=>{
+    const pp = project(r.rob[i], s1.c, s1.rad, s1.scale, s1.W, s1.H);
+    const col = errColor(r.per_point[i]);
+    ctxRob.fillStyle = col;
+    ctxRob.shadowColor = col; ctxRob.shadowBlur = 9*s1.dpr;
+    ctxRob.beginPath(); ctxRob.arc(pp[0], pp[1], 4*s1.dpr, 0, 7); ctxRob.fill();
+    ctxRob.shadowBlur = 0;
+    ctxRob.fillStyle = 'rgba(184,188,196,.8)';
+    ctxRob.fillText('P'+(i+1), pp[0]+8*s1.dpr, pp[1]-7*s1.dpr);
+  });
+
+  /* ---- 右视图：基坐标系叠加，基准点 vs 变换后机器人点 + 残差连线 ---- */
+  const s2 = drawScene(ctxBas, cvBas, r.base, {});
+  r.base.map((p,i)=>({i, d:project(p,s2.c,s2.rad,s2.scale,s2.W,s2.H)[2]}))
+        .sort((a,b)=>a.d-b.d)
+        .forEach(({i})=>{
+    const pb = project(r.base[i],    s2.c, s2.rad, s2.scale, s2.W, s2.H);
+    const pa = project(r.aligned[i], s2.c, s2.rad, s2.scale, s2.W, s2.H);
+    /* 残差连线（夸大显示，突出机器人点与三坐标测量点的偏差） */
+    const exagg = r.base[i].map((v,k)=> v + (r.aligned[i][k]-v)*view.factor);
+    const pe = project(exagg, s2.c, s2.rad, s2.scale, s2.W, s2.H);
+    ctxBas.strokeStyle = 'rgba(216,92,70,.65)'; ctxBas.lineWidth = 1;
+    ctxBas.beginPath(); ctxBas.moveTo(pb[0],pb[1]); ctxBas.lineTo(pe[0],pe[1]); ctxBas.stroke();
+    /* 基准点：青色 */
+    ctxBas.fillStyle = '#5FA8C7';
+    ctxBas.shadowColor = 'rgba(95,168,199,.8)'; ctxBas.shadowBlur = 8*s2.dpr;
+    ctxBas.beginPath(); ctxBas.arc(pb[0], pb[1], 3.4*s2.dpr, 0, 7); ctxBas.fill();
+    /* 变换后的机器人点：按误差着色 */
+    const col = errColor(r.per_point[i]);
+    ctxBas.fillStyle = col;
+    ctxBas.shadowColor = col;
+    ctxBas.beginPath(); ctxBas.arc(pa[0], pa[1], 2.8*s2.dpr, 0, 7); ctxBas.fill();
+    ctxBas.shadowBlur = 0;
+    /* 点号 + 误差值标注 */
+    ctxBas.fillStyle = 'rgba(184,188,196,.8)';
+    ctxBas.fillText('P'+(i+1), pb[0]+7*s2.dpr, pb[1]-6*s2.dpr);
+    ctxBas.fillStyle = col;
+    ctxBas.fillText(r.per_point[i].toFixed(3), pa[0]+7*s2.dpr, pa[1]+12*s2.dpr);
+  });
+}
+CV_LIST.forEach(([c])=>sizeCanvas(c));
+</script>
+</body>
+</html>
