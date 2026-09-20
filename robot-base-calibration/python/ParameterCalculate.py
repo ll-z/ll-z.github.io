@@ -13,7 +13,8 @@ ParameterCalculate.py  ——  三维刚体配准工具（现代 NumPy 实现）
 
 功能：
     1. rigid_transform_3D      : SVD 求两组对应三维点之间的最优刚体变换 (R, t)
-    2. rotation_matrix_to_euler: 旋转矩阵 -> 欧拉角（XYZ 与 KUKA OAT 两套，含万向锁处理）
+    2. rotation_matrix_to_euler: 旋转矩阵 -> 固定轴 XYZ 欧拉角 + KUKA A/B/C（含万向锁处理）
+       rotation_matrix_to_zyz  : 旋转矩阵 -> ZYZ 欧拉角（与 WcsCal 的 ZYZ 一组对应）
     3. quaternion_calculator   : 旋转矩阵 -> 四元数 (w, x, y, z)，Shepperd 方法 + 归一化
     4. error_calculation       : 配准残差（残差向量 / 逐点范数 / RMSE / MAE）
     5. calculate               : 一站式调用（单一刚体变换模型）
@@ -97,33 +98,48 @@ def rotation_matrix_to_euler(R):
     """
     返回
     ----
-    xyz : [Rx, Ry, Rz]   内旋 XYZ 约定（度）
-    zyx : [O, A, T]      KUKA OAT 约定（度），含万向锁退化处理
+    xyz : [Rx, Ry, Rz]  固定轴 X-Y-Z 欧拉角（度），R = Rz(xyz[2])·Ry(xyz[1])·Rx(xyz[0])
+    abc : [A, B, C]     KUKA A/B/C（内旋 Z-Y'-X''），R = Rz(A)·Ry(B)·Rx(C)，
+                        可直接填入 KUKA 控制器；含万向锁退化处理（B = ±90° 时令 A = 0）
+
+    说明：旧版把这里返回的第二个三元组写成 "O A T"，实际算出来的是 ZYZ 欧拉角
+    （R = Rz(a)·Ry(b)·Rz(c)），并非 KUKA 的 A/B/C，已修正；ZYZ 请用
+    rotation_matrix_to_zyz()，与 WcsCal 输出的 ZYZ 一组对应。
     """
     R = np.asarray(R, dtype=float)
     assert R.shape == (3, 3), "旋转矩阵必须是 3x3"
+    R00, R01, R02 = R[0]
+    R10, R11, R12 = R[1]
+    R20, R21, R22 = R[2]
 
-    # XYZ 欧拉角（Tait-Bryan）
-    Rx = math.degrees(math.atan2(R[2, 1], R[2, 2]))
-    Ry = math.degrees(math.atan2(-R[2, 0],
-                                 math.sqrt(R[2, 1] ** 2 + R[2, 2] ** 2)))
-    Rz = math.degrees(math.atan2(R[1, 0], R[0, 0]))
-    xyz = [Rx, Ry, Rz]
+    xyz = [math.degrees(math.atan2(R21, R22)),
+           math.degrees(math.atan2(-R20, math.sqrt(R21 ** 2 + R22 ** 2))),
+           math.degrees(math.atan2(R10, R00))]
 
-    # KUKA OAT
-    sinA = math.sqrt(R[2, 0] ** 2 + R[2, 1] ** 2)
-    if sinA < 1e-12:
-        # 万向锁：A ≈ 0°/180°，O 与 T 耦合，令 O = 0
-        A = math.degrees(math.atan2(sinA, R[2, 2]))
-        O = 0.0
-        T = math.degrees(math.atan2(-R[0, 1], R[1, 1]))
+    cosB = math.sqrt(R21 ** 2 + R22 ** 2)          # = |cos B|
+    B = math.degrees(math.atan2(-R20, cosB))
+    if cosB < 1e-12:
+        A, C = 0.0, math.degrees(math.atan2(-R20 * R01, R11))   # 万向锁
     else:
-        A = math.degrees(math.atan2(sinA, R[2, 2]))
-        sA = math.sin(math.radians(A))
-        O = math.degrees(math.atan2(R[1, 2] / sA, R[0, 2] / sA))
-        T = math.degrees(math.atan2(R[2, 1] / sA, -R[2, 0] / sA))
+        A = math.degrees(math.atan2(R10, R00))
+        C = math.degrees(math.atan2(R21, R22))
+    return xyz, [A, B, C]
 
-    return xyz, [O, A, T]
+
+def rotation_matrix_to_zyz(R):
+    """ZYZ 欧拉角 [a, b, c]：R = Rz(a)·Ry(b)·Rz(c)（度），含万向锁退化处理。"""
+    R = np.asarray(R, dtype=float)
+    R00, R01, R02 = R[0]
+    R10, R11, R12 = R[1]
+    R20, R21, R22 = R[2]
+    sinB = math.sqrt(R20 ** 2 + R21 ** 2)          # = |sin b|
+    b = math.degrees(math.atan2(sinB, R22))
+    if sinB < 1e-12:
+        a, c = 0.0, math.degrees(math.atan2(-R01, R11))
+    else:
+        a = math.degrees(math.atan2(R12, R02))
+        c = math.degrees(math.atan2(R21, -R20))
+    return [a, b, c]
 
 
 # ============================================================
@@ -413,18 +429,19 @@ def rigid_transform_with_tcp(source, target, Rt, ndir=24):
 def calculate_with_tcp(rob_data, base_data, Rt):
     """一站式调用（含电极帽 TCP 自动标定）。
 
-    返回 (t, euler_xyz, euler_oat, quat, R, err_vec, per_point, rmse, mae, tcp)，
-    前 9 项含义与 calculate() 完全一致，最后多返回工具坐标系下的 TCP 偏移 c。
+    返回 (t, euler_xyz, euler_abc, euler_zyz, quat, R, err_vec, per_point, rmse, mae, tcp)，
+    前 10 项含义与 calculate() 完全一致，最后多返回工具坐标系下的 TCP 偏移 c。
     """
     if Rt is None:
         raise ValueError("缺少工具姿态（A/B/C / W/P/R / 四元数），无法自动标定 TCP")
     R, t, tcp, _ = rigid_transform_with_tcp(np.asarray(base_data, float),
                                             np.asarray(rob_data, float), Rt)
     target = np.asarray(rob_data, float) + Rt @ tcp      # 实际电极帽触点
-    euler_xyz, euler_oat = rotation_matrix_to_euler(R)
+    euler_xyz, euler_abc = rotation_matrix_to_euler(R)
+    euler_zyz = rotation_matrix_to_zyz(R)
     quat = quaternion_calculator(R)
     err_vec, per_point, rmse, mae = error_calculation(base_data, target, R, t)
-    return t, euler_xyz, euler_oat, quat, R, err_vec, per_point, rmse, mae, tcp
+    return t, euler_xyz, euler_abc, euler_zyz, quat, R, err_vec, per_point, rmse, mae, tcp
 
 
 # ============================================================
@@ -439,8 +456,9 @@ def calculate(rob_data, base_data):
     返回
     ----
     t         : (3,)      平移
-    euler_xyz : [Rx,Ry,Rz] XYZ 欧拉角（度）
-    euler_oat : [O,A,T]    KUKA OAT 角（度）
+    euler_xyz : [Rx,Ry,Rz] 固定轴 XYZ 欧拉角（度）
+    euler_abc : [A,B,C]    KUKA A/B/C（内旋 Z-Y'-X''，度）
+    euler_zyz : [a,b,c]    ZYZ 欧拉角（度，与 WcsCal 的 ZYZ 对应）
     quat      : [w,x,y,z]  四元数
     R         : (3,3)      旋转矩阵
     err_vec   : (N,3)      残差向量
@@ -449,7 +467,8 @@ def calculate(rob_data, base_data):
     mae       : float
     """
     R, t = rigid_transform_3D(base_data, rob_data)
-    euler_xyz, euler_oat = rotation_matrix_to_euler(R)
+    euler_xyz, euler_abc = rotation_matrix_to_euler(R)
+    euler_zyz = rotation_matrix_to_zyz(R)
     quat = quaternion_calculator(R)
     err_vec, per_point, rmse, mae = error_calculation(base_data, rob_data, R, t)
-    return t, euler_xyz, euler_oat, quat, R, err_vec, per_point, rmse, mae
+    return t, euler_xyz, euler_abc, euler_zyz, quat, R, err_vec, per_point, rmse, mae

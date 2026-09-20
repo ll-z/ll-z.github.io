@@ -36,6 +36,8 @@
 5. 欧拉角（含万向锁退化处理）、四元数（Shepperd 方法 + 归一化）
 6. 残差：`err = target − (R @ source + t)`，统计逐点范数 / RMSE / MAE
 
+> 📘 **完整理论推导**（坐标系与旋转约定、Kabsch/SVD 的推导与病态分析、带未知 TCP 的 9 参数模型、多起点 LM、可辨识性判据、与 WcsCal 的逐项对照、数值实践清单）见 **[THEORY.md](THEORY.md)**。
+>
 > 已移除旧版 `np.mat` / `np.tile` 用法（`np.mat` 自 NumPy 2.0 起被移除），
 > 改用 `np.asarray`、`@` 运算符与广播，兼容 NumPy 1.x 与 2.x。
 

@@ -53,7 +53,7 @@ def self_test():
     rob = (R_true @ base.T).T + t_true                        # 机器人坐标系点
     rob += rng.normal(0, 0.02, base.shape)                    # 0.02mm 测量噪声
 
-    t, euler, oat, quat, R, err, per_point, rmse, mae = calculate(rob, base)
+    t, euler, abc, zyz, quat, R, err, per_point, rmse, mae = calculate(rob, base)
 
     print("\n[恢复精度]")
     print("  R 误差 (Frobenius) :", np.linalg.norm(R - R_true))
@@ -61,7 +61,8 @@ def self_test():
     print("  t 估计             :", np.round(t, 4))
     print("\n[输出参数]")
     print("  欧拉角 Rx Ry Rz (°):", np.round(euler, 4))
-    print("  KUKA O  A   T  (°) :", np.round(oat, 4))
+    print("  KUKA A  B   C  (°) :", np.round(abc, 4))
+    print("  ZYZ 欧拉角     (°) :", np.round(zyz, 4))
     print("  四元数 (w,x,y,z)   :", np.round(quat, 6))
     print("\n[误差]")
     print("  逐点 |d| (mm)      :", np.round(per_point, 4))
@@ -85,13 +86,14 @@ def tcp_self_test():
     rob = ((R_true @ base.T).T + t_true) - (Rt @ c_true)     # E6POS = 实际触点 - Rtool·c
     rob += rng.normal(0, 0.02, base.shape)                   # 0.02mm 噪声
 
-    t, euler, oat, quat, R, err, per_point, rmse, mae, tcp = calculate_with_tcp(rob, base, Rt)
+    t, euler, abc, zyz, quat, R, err, per_point, rmse, mae, tcp = calculate_with_tcp(rob, base, Rt)
     print("  工具姿态跨度        : %.2f°" % orientation_spread(Rt))
     print("  c 真值              :", c_true)
     print("  c 估计              :", np.round(tcp, 4),
           " (误差 %.4f mm)" % np.linalg.norm(tcp - c_true))
     print("  R 误差 (Frobenius)  : %.3e" % np.linalg.norm(R - R_true))
     print("  t 误差 (mm)         : %.4f" % np.linalg.norm(t - t_true))
+    print("  KUKA A B C          :", np.round(abc, 4))
     print("  RMSE                : %.4f mm" % rmse)
 
 
@@ -126,14 +128,15 @@ def run_files(robot_path, base_path, robot_type, use_tcp=False):
 
     tcp = None
     if use_tcp:
-        t, euler, oat, quat, R, err, per_point, rmse, mae, tcp = calculate_with_tcp(rob, base, Rt)
+        t, euler, abc, zyz, quat, R, err, per_point, rmse, mae, tcp = calculate_with_tcp(rob, base, Rt)
     else:
-        t, euler, oat, quat, R, err, per_point, rmse, mae = calculate(rob, base)
+        t, euler, abc, zyz, quat, R, err, per_point, rmse, mae = calculate(rob, base)
 
     print("点位数:", len(rob))
     print("\nX Y Z (mm)\n", t)
     print("\nRx Ry Rz (°):", np.round(euler, 6))
-    print("O  A  T  (°):", np.round(oat, 6))
+    print("KUKA A B C (°):", np.round(abc, 6), "  (内旋 Z-Y'-X''，可直接填入 KUKA)")
+    print("ZYZ 欧拉角 (°):", np.round(zyz, 6), "  (与 WcsCal 的 ZYZ 一组对应)")
     print("q1 q2 q3 q4 :", np.round(quat, 6))
     print("\n旋转矩阵 R\n", R)
     if tcp is not None:

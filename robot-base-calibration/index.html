@@ -290,7 +290,7 @@ pre.code{
       <div class="hint">
         算法流程：<b>解析点位</b> → 质心对齐 → 协方差矩阵 <b>H = AAᵀ·BB</b> →
         <b>SVD 分解</b> 求旋转 R（反射修正）→ 平移 <b>t = −R·μA + μB</b> →
-        欧拉角 / OAT / 四元数 → 逐点残差。<br>
+        欧拉角 / KUKA A B C / ZYZ / 四元数 → 逐点残差。<br>
         全部计算由浏览器内嵌的 <b>Python + NumPy</b> 完成（Pyodide / WebAssembly）。<br>
         <b>勾选「自动标定电极帽 TCP」</b>时改用 9 参数模型
         <b>R·base + t = rob + R<sub>tool</sub>·c</b>：由 A/B/C 姿态还原每点工具坐标系，
@@ -347,12 +347,13 @@ pre.code{
             </div>
           </div>
           <div class="rcard tri">
-            <div class="rk">KUKA O A T / °</div>
+            <div class="rk">KUKA A B C / °（内旋 Z-Y′-X″，可直接填入控制器）</div>
             <div class="rv">
-              <span><i>O</i><b id="ro">—</b></span>
               <span><i>A</i><b id="ra">—</b></span>
-              <span><i>T</i><b id="rt">—</b></span>
+              <span><i>B</i><b id="rb">—</b></span>
+              <span><i>C</i><b id="rc">—</b></span>
             </div>
+            <div class="rsub" id="zyzNote"></div>
           </div>
           <div class="rcard quat">
             <div class="rk">四元数 q1 q2 q3 q4</div>
@@ -411,6 +412,7 @@ pre.code{
 
     <section class="panel reveal" style="animation-delay:.33s">
       <div class="marker">06 / 算法源码</div>
+      <div class="hint" style="margin:0 0 10px">📘 完整理论推导（坐标系与旋转约定、Kabsch 证明、9 参数 TCP 模型、多起点 LM、可辨识性判据、与 WcsCal 逐项对照）见 <a href="https://github.com/ll-z/ll-z.github.io/blob/main/robot-base-calibration/THEORY.md" target="_blank" rel="noopener" style="color:var(--signal)">THEORY.md</a>（GitHub 上带公式渲染；本地同目录 <a href="./THEORY.md" style="color:var(--signal)">副本</a>）</div>
       <details class="src">
         <summary>查看在浏览器中实际执行的 Python 代码（优化版 ParameterCalculate）</summary>
         <pre class="code" id="srcView"></pre>
@@ -675,23 +677,41 @@ def orientation_spread(Rt):
             m = max(m, math.degrees(math.acos(max(-1.0, min(1.0, float(z[i] @ z[j]))))))
     return m
 
-# ---------- 2. 旋转矩阵 -> 欧拉角（XYZ 与 KUKA OAT 两套，含万向锁处理）----------
+# ---------- 2. 旋转矩阵 -> 欧拉角（固定轴 XYZ / KUKA A-B-C / ZYZ 三套，含万向锁处理）----------
 def rotation_matrix_to_euler(R):
-    Rx = math.degrees(math.atan2(R[2, 1], R[2, 2]))
-    Ry = math.degrees(math.atan2(-R[2, 0], math.sqrt(R[2, 1]**2 + R[2, 2]**2)))
-    Rz = math.degrees(math.atan2(R[1, 0], R[0, 0]))
-    xyz = [Rx, Ry, Rz]
-    sinA = math.sqrt(R[2, 0]**2 + R[2, 1]**2)
-    if sinA < 1e-12:               # 万向锁：A ≈ 0°/180°，O 与 T 耦合，令 O=0
-        A = math.degrees(math.atan2(sinA, R[2, 2]))
-        O = 0.0
-        T = math.degrees(math.atan2(-R[0, 1], R[1, 1]))
+    """返回 (xyz, abc)。
+
+    xyz : 固定轴 X-Y-Z 欧拉角（等价于内旋 Z-Y'-X'' 的反序），R = Rz(xyz[2])·Ry(xyz[1])·Rx(xyz[0])
+    abc : KUKA A/B/C（内旋 Z-Y'-X''），R = Rz(A)·Ry(B)·Rx(C)，可直接填入 KUKA 控制器
+    """
+    R00, R01, R02 = R[0]
+    R10, R11, R12 = R[1]
+    R20, R21, R22 = R[2]
+    xyz = [math.degrees(math.atan2(R21, R22)),
+           math.degrees(math.atan2(-R20, math.sqrt(R21*R21 + R22*R22))),
+           math.degrees(math.atan2(R10, R00))]
+    cosB = math.sqrt(R21*R21 + R22*R22)          # = |cos B|
+    B = math.degrees(math.atan2(-R20, cosB))
+    if cosB < 1e-12:                             # 万向锁：B = ±90°，A 与 C 耦合，令 A = 0
+        A, C = 0.0, math.degrees(math.atan2(-R20 * R01, R11))
     else:
-        A  = math.degrees(math.atan2(sinA, R[2, 2]))
-        sA = math.sin(math.radians(A))
-        O  = math.degrees(math.atan2(R[1, 2] / sA,  R[0, 2] / sA))
-        T  = math.degrees(math.atan2(R[2, 1] / sA, -R[2, 0] / sA))
-    return xyz, [O, A, T]
+        A = math.degrees(math.atan2(R10, R00))
+        C = math.degrees(math.atan2(R21, R22))
+    return xyz, [A, B, C]
+
+def rotation_matrix_to_zyz(R):
+    """ZYZ 欧拉角：R = Rz(a)·Ry(b)·Rz(c)，与 WcsCal / 旧版脚本输出的 ZYZ 一组对应。"""
+    R00, R01, R02 = R[0]
+    R10, R11, R12 = R[1]
+    R20, R21, R22 = R[2]
+    sinB = math.sqrt(R20*R20 + R21*R21)          # = |sin b|
+    b = math.degrees(math.atan2(sinB, R22))
+    if sinB < 1e-12:                             # 万向锁：令 a = 0
+        a, c = 0.0, math.degrees(math.atan2(-R01, R11))
+    else:
+        a = math.degrees(math.atan2(R12, R02))
+        c = math.degrees(math.atan2(R21, -R20))
+    return [a, b, c]
 
 # ---------- 3. 旋转矩阵 -> 四元数（Shepperd 方法 + 归一化）----------
 def quaternion_calculator(R):
@@ -771,7 +791,8 @@ def run_calculation(robot_text, base_text, robot_type, model='auto', align='auto
         tcp = None
 
     target = Q if tcp is None else Q + Rt @ tcp      # 实际电极帽触点
-    euler, oat = rotation_matrix_to_euler(R)
+    euler, abc = rotation_matrix_to_euler(R)
+    zyz = rotation_matrix_to_zyz(R)
     quat = quaternion_calculator(R)
     err, per_point, rmse, mae = error_calculation(P, target, R, t)
     aligned = (R.T @ (target - t).T).T               # 触点回算到基坐标系，用于可视化
@@ -779,7 +800,8 @@ def run_calculation(robot_text, base_text, robot_type, model='auto', align='auto
     # 逆变换：base ≈ R_inv @ rob + t_inv（机器人 → 基）
     R_inv = R.T
     t_inv = -R.T @ t
-    euler_inv, oat_inv = rotation_matrix_to_euler(R_inv)
+    euler_inv, abc_inv = rotation_matrix_to_euler(R_inv)
+    zyz_inv = rotation_matrix_to_zyz(R_inv)
     quat_inv = quaternion_calculator(R_inv)
 
     # 点标签：优先用三坐标文件的点号（基准点号），其次机器人点名，都没有则按序号
@@ -795,9 +817,9 @@ def run_calculation(robot_text, base_text, robot_type, model='auto', align='auto
         'spread': spread, 'align': mode, 'note': note, 'model_note': model_note,
         'labels': labels, 'pairs': [[int(i), int(j)] for i, j in pairs],
         't': t.tolist(), 'R': R.tolist(),
-        'euler': euler, 'oat': oat, 'quat': quat,
+        'euler': euler, 'abc': abc, 'zyz': zyz, 'quat': quat,
         'inv': {'t': t_inv.tolist(), 'R': R_inv.tolist(),
-                'euler': euler_inv, 'oat': oat_inv, 'quat': quat_inv},
+                'euler': euler_inv, 'abc': abc_inv, 'zyz': zyz_inv, 'quat': quat_inv},
         'err': err.tolist(), 'per_point': per_point.tolist(),
         'rmse': rmse, 'mae': mae,
         'max_abs': float(np.abs(err).max()),
@@ -1136,7 +1158,8 @@ function renderTransform(r, dir){
   const d = dir === 1 ? r.inv : r;
   $('tx').textContent = fmt(d.t[0],3); $('ty').textContent = fmt(d.t[1],3); $('tz').textContent = fmt(d.t[2],3);
   $('rx').textContent = fmt(d.euler[0]); $('ry').textContent = fmt(d.euler[1]); $('rz').textContent = fmt(d.euler[2]);
-  $('ro').textContent = fmt(d.oat[0]);  $('ra').textContent = fmt(d.oat[1]);  $('rt').textContent = fmt(d.oat[2]);
+  $('ra').textContent = fmt(d.abc[0]);  $('rb').textContent = fmt(d.abc[1]);  $('rc').textContent = fmt(d.abc[2]);
+  $('zyzNote').textContent = 'ZYZ 欧拉角：' + d.zyz.map(v=>fmt(v,4)).join('  ') + '   （与 WcsCal 的 ZYZ 一组对应）';
   $('quat').innerHTML = d.quat.map((q,i)=>`<span style="display:flex;justify-content:space-between"><i style="font-style:normal;color:var(--faint);font-size:10px;letter-spacing:.14em">q${i+1}</i><b>${fmt(q,6)}</b></span>`).join('');
   const cap = dir === 1 ? '机器人坐标系 → 基坐标系（逆变换）' : '基坐标系 → 机器人坐标系（正向）';
   $('rmat').innerHTML =
@@ -1165,8 +1188,11 @@ X Y Z
 Rx Ry Rz
   ${d.euler.map(v=>v.toFixed(6)).join('  ')}
 
-O A T
-  ${d.oat.map(v=>v.toFixed(6)).join('  ')}
+KUKA A B C（内旋 Z-Y'-X''）
+  ${d.abc.map(v=>v.toFixed(6)).join('  ')}
+
+ZYZ 欧拉角
+  ${d.zyz.map(v=>v.toFixed(6)).join('  ')}
 
 q1 q2 q3 q4
   ${d.quat.map(v=>v.toFixed(6)).join('  ')}
