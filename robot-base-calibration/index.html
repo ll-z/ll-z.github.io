@@ -258,6 +258,7 @@ pre.code{
         <input type="file" id="robotFile" accept=".dat,.ls,.mod,.txt" hidden>
       </div>
       <label class="chk"><input type="checkbox" id="chkOutlier">示例数据注入 2mm 超差点（P4）</label>
+      <label class="chk"><input type="checkbox" id="chkTCP">自动标定电极帽 TCP（未知工具偏移 c，需文件含 A/B/C 姿态）</label>
 
       <div class="field-label">三坐标测量文件（.txt，逗号分隔）</div>
       <textarea id="baseText" spellcheck="false" placeholder="点号,X坐标,Y坐标,Z坐标"></textarea>
@@ -272,7 +273,11 @@ pre.code{
         算法流程：<b>解析点位</b> → 质心对齐 → 协方差矩阵 <b>H = AAᵀ·BB</b> →
         <b>SVD 分解</b> 求旋转 R（反射修正）→ 平移 <b>t = −R·μA + μB</b> →
         欧拉角 / OAT / 四元数 → 逐点残差。<br>
-        全部计算由浏览器内嵌的 <b>Python + NumPy</b> 完成（Pyodide / WebAssembly）。
+        全部计算由浏览器内嵌的 <b>Python + NumPy</b> 完成（Pyodide / WebAssembly）。<br>
+        <b>勾选「自动标定电极帽 TCP」</b>时改用 9 参数模型
+        <b>R·base + t = rob + R<sub>tool</sub>·c</b>：由 A/B/C 姿态还原每点工具坐标系，
+        用多起点 Gauss-Newton / LM 同时解出 R、t 与工具偏移 c
+        （与 WcsCal 等收费软件同一模型），残差按「实际触点」计算。
       </div>
     </section>
   </div>
@@ -315,6 +320,14 @@ pre.code{
           <div class="rcard quat">
             <div class="rk">四元数 q1 q2 q3 q4</div>
             <div class="rv" id="quat">—</div>
+          </div>
+          <div class="rcard tri" id="tcpCard" hidden>
+            <div class="rk">电极帽 TCP 偏移 c / mm（工具坐标系 · 自动标定）</div>
+            <div class="rv">
+              <span><i>X</i><b id="tcpX">—</b></span>
+              <span><i>Y</i><b id="tcpY">—</b></span>
+              <span><i>Z</i><b id="tcpZ">—</b></span>
+            </div>
           </div>
         </div>
         <pre class="mat" id="rmat"></pre>
@@ -376,36 +389,73 @@ import re, math, json
 import numpy as np
 
 # ---------- 点位文件解析（对应 run.py 的三种机器人格式） ----------
+# 姿态约定：KUKA A/B/C 与 FANUC W/P/R 都是「绕 Z-Y'-X'' 依次旋转」= Rz·Ry·Rx
+def rotation_from_abc(A, B, C):
+    a, b, c = math.radians(A), math.radians(B), math.radians(C)
+    ca, sa = math.cos(a), math.sin(a); cb, sb = math.cos(b), math.sin(b)
+    cc, sc = math.cos(c), math.sin(c)
+    return np.array([[ca*cb, ca*sb*sc - sa*cc, ca*sb*cc + sa*sc],
+                     [sa*cb, sa*sb*sc + ca*cc, sa*sb*cc - ca*sc],
+                     [-sb,   cb*sc,            cb*cc]])
+
+def rotation_from_quat(q):
+    # ABB 四元数 [q1,q2,q3,q4] = [w,x,y,z] -> 旋转矩阵
+    w, x, y, z = [float(v) for v in q]
+    n = math.sqrt(w*w + x*x + y*y + z*z)
+    if n < 1e-12:
+        return np.eye(3)
+    w, x, y, z = w/n, x/n, y/n, z/n
+    return np.array([[1-2*(y*y+z*z), 2*(x*y - w*z), 2*(x*z + w*y)],
+                     [2*(x*y + w*z), 1-2*(x*x+z*z), 2*(y*z - w*x)],
+                     [2*(x*z - w*y), 2*(y*z + w*x), 1-2*(x*x+y*y)]])
+
 def parse_robot_data(text, robot_type):
-    data = []
-    for line in text.splitlines():
-        if robot_type in ('KUKA', 'FANUC'):
-            b = re.split(r'[\s{}=,]', line)
-            if len(b) > 1 and b[1]:
-                if robot_type == 'KUKA' and b[1] == 'E6POS':
-                    data.append([float(b[5]), float(b[7]), float(b[9])])
-                elif robot_type == 'FANUC' and b[1] == 'X':
-                    data.append([float(b[5]), float(b[14]), float(b[22])])
-        else:  # ABB: MoveL / MoveP
+    """返回 (点位 Nx3, 姿态 Nx3x3)。姿态取不到时返回 None（此时不能标定 TCP）。"""
+    pos, rot = [], []
+    if robot_type == 'KUKA':
+        for m in re.finditer(r'E6POS[^{]*\{(.*?)\}', text):
+            kv = dict(re.findall(r'([A-Za-z]+\d*)\s*([-+]?[\d.]+)', m.group(1)))
+            if all(k in kv for k in ('X', 'Y', 'Z')):
+                pos.append([float(kv['X']), float(kv['Y']), float(kv['Z'])])
+                if all(k in kv for k in ('A', 'B', 'C')):
+                    rot.append(rotation_from_abc(float(kv['A']), float(kv['B']), float(kv['C'])))
+    elif robot_type == 'FANUC':
+        for m in re.finditer(r'P\[\d+\]\s*\{(.*?)\}', text, re.S):
+            body = m.group(1)
+            kv = dict(re.findall(r'([XYZ])\s*=\s*([-+]?[\d.]+)', body))
+            if all(k in kv for k in ('X', 'Y', 'Z')):
+                pos.append([float(kv['X']), float(kv['Y']), float(kv['Z'])])
+                ang = dict(re.findall(r'([WPR])\s*=\s*([-+]?[\d.]+)', body))
+                if all(k in ang for k in ('W', 'P', 'R')):
+                    rot.append(rotation_from_abc(float(ang['R']), float(ang['P']), float(ang['W'])))
+    else:  # ABB: MoveL [[x,y,z],[q1,q2,q3,q4],[...],[...]], v200, fine, tool0;
+        for line in text.splitlines():
             a = line.split()
             if a and a[0] in ('MoveL', 'MoveP'):
-                tok = a[1].replace(']', '').replace('[', '')
-                b = tok.split(',')
-                if len(b) > 10:
-                    data.append([float(b[0]), float(b[1]), float(b[2])])
-    return np.array(data)
+                b = a[1].replace(']', '').replace('[', '').split(',')
+                if len(b) > 7:
+                    pos.append([float(b[0]), float(b[1]), float(b[2])])
+                    rot.append(rotation_from_quat(b[3:7]))
+    return np.array(pos).reshape(-1, 3), (np.array(rot) if len(rot) == len(pos) and rot else None)
 
 def parse_base_data(text):
+    """三坐标文件：兼容「点号,X,Y,Z」与「X,Y,Z」两种列格式，自动跳过表头。"""
     data = []
     for line in text.splitlines():
-        if len(line) > 10:
-            b = re.split(r'[,]', line)
-            if len(b) > 3 and b[1] and b[2] and b[3]:
-                try:
-                    data.append([float(b[1]), float(b[2]), float(b[3])])
-                except ValueError:
-                    pass  # 跳过表头行
-    return np.array(data)
+        parts = [v.strip() for v in re.split(r'[,;\t]', line.strip()) if v.strip() != '']
+        if len(parts) < 3:
+            continue
+        vals = []
+        for v in parts[:4]:
+            try:
+                vals.append(float(v))
+            except ValueError:
+                vals.append(None)
+        if len(parts) >= 4 and vals[1] is not None and vals[2] is not None and vals[3] is not None:
+            data.append(vals[1:4])          # 点号,X,Y,Z
+        elif vals[0] is not None and vals[1] is not None and vals[2] is not None:
+            data.append(vals[0:3])          # X,Y,Z
+    return np.array(data).reshape(-1, 3)
 
 # ---------- 1. 刚体配准：SVD 求最优 R, t ----------
 def rigid_transform_3D(source, target):
@@ -422,6 +472,92 @@ def rigid_transform_3D(source, target):
         R = Vt.T @ U.T
     t = mu_t - R @ mu_s            # 由 mu_t = R·mu_s + t 解出平移
     return R, t
+
+# ---------- 1b. 电极帽 TCP 自动标定：R、t 与工具偏移 c 同时求解 ----------
+# 模型：机器人程序里的 E6POS 是「编程 TCP」的位置，实际电极帽触点在工具坐标系下还差一个偏移 c：
+#           实际触点 = rob_i + Rtool_i · c       （Rtool_i 由 A/B/C 姿态给出）
+#       配准关系：R · base_i + t = rob_i + Rtool_i · c
+# 未知量 9 个（R 3 + t 3 + c 3）。目标函数对 c 是线性、对 R 是非凸，
+# 故用「多起点 + Gauss-Newton / Levenberg-Marquardt（R 用指数映射保持正交）」求解。
+def _hat(w):
+    return np.array([[0.0, -w[2], w[1]], [w[2], 0.0, -w[0]], [-w[1], w[0], 0.0]])
+
+def _exp_so3(w):
+    # 罗德里格斯公式：so(3) -> SO(3)
+    th = float(np.linalg.norm(w))
+    if th < 1e-12:
+        return np.eye(3) + _hat(w)
+    K = _hat(w / th)
+    return np.eye(3) + math.sin(th) * K + (1.0 - math.cos(th)) * (K @ K)
+
+def _fib_dirs(n):
+    # 球面均匀方向（Fibonacci 球），用作 c 的多起点
+    i = np.arange(n) + 0.5
+    phi = np.arccos(1.0 - 2.0 * i / n)
+    th = math.pi * (1.0 + 5.0 ** 0.5) * i
+    return np.stack([np.cos(th) * np.sin(phi), np.sin(th) * np.sin(phi), np.cos(phi)], axis=1)
+
+def _lm_tcp(base, rob, Rt, R, t, c, iters=60):
+    # Levenberg-Marquardt：每步用 R <- R·exp([dw]) 更新，天然保持正交
+    lam, n = 1e-3, len(base)
+    eye3 = np.eye(3)
+    def resid(R, t, c):
+        return ((R @ base.T).T + t - (rob + Rt @ c)).reshape(-1)
+    r = resid(R, t, c)
+    cost = float(r @ r)
+    for _ in range(iters):
+        Bh = np.zeros((n, 3, 3))
+        Bh[:, 0, 1] = -base[:, 2]; Bh[:, 0, 2] =  base[:, 1]
+        Bh[:, 1, 0] =  base[:, 2]; Bh[:, 1, 2] = -base[:, 0]
+        Bh[:, 2, 0] = -base[:, 1]; Bh[:, 2, 1] =  base[:, 0]
+        J = np.concatenate([-np.einsum('ij,njk->nik', R, Bh), -Rt,
+                            np.broadcast_to(eye3, (n, 3, 3))], axis=2).reshape(3 * n, 9)
+        JtJ = J.T @ J
+        g = J.T @ r
+        d = None
+        for _ in range(40):
+            try:
+                d = np.linalg.solve(JtJ + lam * np.diag(np.maximum(np.diag(JtJ), 1e-12)), -g)
+            except np.linalg.LinAlgError:
+                lam *= 10.0
+                continue
+            Rn = R @ _exp_so3(d[:3]); cn = c + d[3:6]; tn = t + d[6:9]
+            rn = resid(Rn, tn, cn)
+            k = float(rn @ rn)
+            if k < cost:                     # 接受：降阻尼
+                R, t, c, r, cost = Rn, tn, cn, rn, k
+                lam = max(lam / 3.0, 1e-12)
+                break
+            lam *= 10.0                      # 拒绝：加阻尼
+        else:
+            break
+        if np.linalg.norm(d) < 1e-14:
+            break
+    return R, t, c
+
+def rigid_transform_with_tcp(base, rob, Rt, ndir=24):
+    # 多起点：c = 0 起 + 两圈球面方向（半径取点云尺度）；交替迭代只收敛到鞍点，故用 LM
+    scale = float(np.linalg.norm(rob - rob.mean(axis=0), axis=1).mean()) or 1.0
+    starts = [np.zeros(3)]
+    for rad in (0.5 * scale, 1.0 * scale):
+        starts.extend(list(_fib_dirs(ndir) * rad))
+    best = None
+    for c0 in starts:
+        R0, t0 = rigid_transform_3D(base, rob + Rt @ c0)
+        R, t, c = _lm_tcp(base, rob, Rt, R0, t0, c0)
+        e = ((R @ base.T).T + t) - (rob + Rt @ c)
+        v = float(np.sqrt(np.mean(np.sum(e * e, axis=1))))
+        if best is None or v < best[0]:
+            best = (v, R, t, c)
+    return best[1], best[2], best[3], best[0]
+
+def orientation_spread(Rt):
+    # 工具 Z 轴两两夹角最大值（度）：判断 TCP 是否可辨识
+    z, m = Rt[:, :, 2], 0.0
+    for i in range(len(z)):
+        for j in range(i + 1, len(z)):
+            m = max(m, math.degrees(math.acos(max(-1.0, min(1.0, float(z[i] @ z[j]))))))
+    return m
 
 # ---------- 2. 旋转矩阵 -> 欧拉角（XYZ 与 KUKA OAT 两套，含万向锁处理）----------
 def rotation_matrix_to_euler(R):
@@ -469,8 +605,8 @@ def error_calculation(source, target, R, t):
     mae  = float(np.mean(per_point))
     return err_vec, per_point, rmse, mae
 
-def run_calculation(robot_text, base_text, robot_type):
-    rob  = parse_robot_data(robot_text, robot_type)
+def run_calculation(robot_text, base_text, robot_type, use_tcp=False):
+    rob, Rt = parse_robot_data(robot_text, robot_type)
     base = parse_base_data(base_text)
     if len(rob) == 0 or len(base) == 0:
         return json.dumps({'ok': False, 'message': '未能从文件中解析出点位，请检查文件格式与机器人类型是否匹配'})
@@ -478,11 +614,23 @@ def run_calculation(robot_text, base_text, robot_type):
         return json.dumps({'ok': False, 'message': '选择的文件中点位不等：机器人 %d 点 / 三坐标 %d 点' % (len(rob), len(base))})
     if len(rob) < 3:
         return json.dumps({'ok': False, 'message': '测量点至少为三点'})
-    R, t = rigid_transform_3D(base, rob)        # 正变换：rob ≈ R @ base + t（基 → 机器人）
+
+    spread = orientation_spread(Rt) if Rt is not None else 0.0
+    tcp = None
+    if use_tcp:
+        if Rt is None:
+            return json.dumps({'ok': False, 'message': '这份机器人文件里没有解析到姿态（A/B/C 或四元数），无法自动标定 TCP；请换用含姿态的程序文件，或取消勾选'})
+        if spread < 5.0:
+            return json.dumps({'ok': False, 'message': '各示教点姿态几乎相同（工具 Z 轴最大夹角仅 %.1f°），TCP 不可辨识；请使用姿态有明显变化的示教点' % spread})
+        R, t, tcp, _ = rigid_transform_with_tcp(base, rob, Rt)
+    else:
+        R, t = rigid_transform_3D(base, rob)
+
+    target = rob if tcp is None else rob + Rt @ tcp      # 实际电极帽触点
     euler, oat = rotation_matrix_to_euler(R)
     quat = quaternion_calculator(R)
-    err, per_point, rmse, mae = error_calculation(base, rob, R, t)
-    aligned = (R.T @ (rob - t).T).T             # 机器人点回算到基坐标系，用于可视化
+    err, per_point, rmse, mae = error_calculation(base, target, R, t)
+    aligned = (R.T @ (target - t).T).T                  # 触点回算到基坐标系，用于可视化
 
     # 逆变换：base ≈ R_inv @ rob + t_inv（机器人 → 基）
     R_inv = R.T
@@ -492,6 +640,9 @@ def run_calculation(robot_text, base_text, robot_type):
 
     return json.dumps({
         'ok': True, 'n': int(len(rob)),
+        'use_tcp': bool(tcp is not None),
+        'tcp': (tcp.tolist() if tcp is not None else None),
+        'spread': spread,
         't': t.tolist(), 'R': R.tolist(),
         'euler': euler, 'oat': oat, 'quat': quat,
         'inv': {'t': t_inv.tolist(), 'R': R_inv.tolist(),
@@ -499,7 +650,8 @@ def run_calculation(robot_text, base_text, robot_type):
         'err': err.tolist(), 'per_point': per_point.tolist(),
         'rmse': rmse, 'mae': mae,
         'max_abs': float(np.abs(err).max()),
-        'base': base.tolist(), 'rob': rob.tolist(), 'aligned': aligned.tolist(),
+        'base': base.tolist(), 'rob': rob.tolist(),
+        'rob_actual': target.tolist(), 'aligned': aligned.tolist(),
     })
 </script>
 <script src="https://cdn.jsdelivr.net/pyodide/v0.26.4/full/pyodide.js"></script>
@@ -656,7 +808,8 @@ $('btnRun').onclick = ()=>{
       pyodide.globals.set('g_robot_text', $('robotText').value);
       pyodide.globals.set('g_base_text',  $('baseText').value);
       pyodide.globals.set('g_rtype', robotType);
-      const res = JSON.parse(pyodide.runPython('run_calculation(g_robot_text, g_base_text, g_rtype)'));
+      pyodide.globals.set('g_use_tcp', $('chkTCP').checked);
+      const res = JSON.parse(pyodide.runPython('run_calculation(g_robot_text, g_base_text, g_rtype, g_use_tcp)'));
       if(!res.ok){ showError(res.message); return; }
       lastResult = res;
       renderResult(res);
@@ -684,11 +837,20 @@ function renderResult(r){
 
   renderTransform(r, 0);
 
+  /* 电极帽 TCP 偏移（勾选自动标定后才有） */
+  $('tcpCard').hidden = !r.use_tcp;
+  if(r.use_tcp){
+    $('tcpX').textContent = fmt(r.tcp[0],3);
+    $('tcpY').textContent = fmt(r.tcp[1],3);
+    $('tcpZ').textContent = fmt(r.tcp[2],3);
+  }
+
   const bad = r.max_abs > 1;
   const badge = $('errBadge');
   badge.className = 'badge ' + (bad ? 'bad' : 'ok');
   badge.textContent = bad ? '结果超差' : '合格';
-  $('errNote').textContent = `点位数 ${r.n} · RMSE ${r.rmse.toFixed(4)} mm · MAE ${r.mae.toFixed(4)} mm · 最大分量误差 ${r.max_abs.toFixed(4)} mm · 阈值 ±1 mm`;
+  $('errNote').textContent = `点位数 ${r.n} · RMSE ${r.rmse.toFixed(4)} mm · MAE ${r.mae.toFixed(4)} mm · 最大分量误差 ${r.max_abs.toFixed(4)} mm · 阈值 ±1 mm`
+    + (r.use_tcp ? ` · TCP |c| = ${Math.hypot(r.tcp[0],r.tcp[1],r.tcp[2]).toFixed(3)} mm（工具坐标系，姿态跨度 ${r.spread.toFixed(1)}°）` : '');
 
   /* 误差表 */
   const maxN = Math.max(...r.per_point);
@@ -760,7 +922,11 @@ ${mat(d.R)}`;
 ${blk(r,    '变换 ① 基坐标系 → 机器人坐标系（正向）')}
 
 ${blk(r.inv,'变换 ② 机器人坐标系 → 基坐标系（逆变换）')}
-
+${r.use_tcp ? `
+电极帽 TCP 偏移 c（工具坐标系下，自动标定）
+  ${fmt(r.tcp[0],6).padStart(11)}${fmt(r.tcp[1],6).padStart(11)}${fmt(r.tcp[2],6).padStart(11)}
+  |c| = ${Math.hypot(r.tcp[0],r.tcp[1],r.tcp[2]).toFixed(6)} mm
+` : ''}
 Err (dX dY dZ / mm)
 ${mat(r.err)}
 
@@ -955,19 +1121,20 @@ function drawAll(){
   if(!viewData) return;
   const r = viewData;
   /* 理论位置（机器人坐标系下由 R,t 预测的示教点）：pred = R @ base + t = rob - err */
-  const pred = r.rob.map((p,i)=>p.map((v,k)=> v - r.err[i][k]));
+  const robNow = r.rob_actual || r.rob;   // 标定 TCP 后为「实际电极帽触点」= E6POS + Rtool·c
+  const pred = robNow.map((p,i)=>p.map((v,k)=> v - r.err[i][k]));
 
   /* ---- 左视图：机器人坐标系（真实坐标）—— 理论(空心) vs 实际示教点(实心,误差着色) ---- */
   /* 基坐标系在机器人坐标系中的样子：原点 = t，轴方向 = R 的列 */
-  const s1 = drawScene(ctxRob, cvRob, r.rob, views.rob, [r.t]);
+  const s1 = drawScene(ctxRob, cvRob, robNow, views.rob, [r.t]);
   drawFrame(ctxRob, s1, views.rob, r.t, r.R, 'BASE');
-  r.rob.map((p,i)=>({i, d:project(p,s1.c,s1.rad,s1.scale,s1.W,s1.H,views.rob)[2]}))
+  robNow.map((p,i)=>({i, d:project(p,s1.c,s1.rad,s1.scale,s1.W,s1.H,views.rob)[2]}))
        .sort((a,b)=>a.d-b.d)
        .forEach(({i})=>{
-    const pa = project(r.rob[i],  s1.c, s1.rad, s1.scale, s1.W, s1.H, views.rob);
+    const pa = project(robNow[i],  s1.c, s1.rad, s1.scale, s1.W, s1.H, views.rob);
     const pt = project(pred[i],   s1.c, s1.rad, s1.scale, s1.W, s1.H, views.rob);
     /* 残差连线（夸大）：实际点 -> 理论方向 */
-    const exagg = r.rob[i].map((v,k)=> v + (pred[i][k]-v)*resFactor);
+    const exagg = robNow[i].map((v,k)=> v + (pred[i][k]-v)*resFactor);
     const pe = project(exagg, s1.c, s1.rad, s1.scale, s1.W, s1.H, views.rob);
     ctxRob.strokeStyle='rgba(216,92,70,.65)'; ctxRob.lineWidth=1;
     ctxRob.beginPath(); ctxRob.moveTo(pa[0],pa[1]); ctxRob.lineTo(pe[0],pe[1]); ctxRob.stroke();
