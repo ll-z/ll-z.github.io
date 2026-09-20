@@ -535,6 +535,11 @@ def pair_points(nr, nb, rid, bid, align='auto'):
             bmap[x] = j
         pairs = [(i, bmap[x]) for i, x in enumerate(rid) if x in bmap]
         miss = [x for x in rid if x not in bmap]
+        # 自动模式：两侧点号体系不同（如机器人 XLHP005 / 三坐标 P1）匹配太少 -> 退回按顺序
+        if align == 'auto' and len(pairs) < max(3, 0.5 * min(nr, nb)):
+            p = [(i, i) for i in range(min(nr, nb))]
+            return p, 'order', ('点号只匹配到 %d 对（机器人 %s…／三坐标 %s…），已自动退回「按文件顺序」对齐'
+                                % (len(pairs), rid[:3], bid[:3]))
         note = '按点号对齐：机器人 %d 点 / 三坐标 %d 点 → 匹配 %d 对' % (nr, nb, len(pairs))
         if miss:
             note += '；机器人侧 %d 个点号在三坐标里没有，已跳过' % len(miss)
@@ -728,7 +733,7 @@ def run_calculation(robot_text, base_text, robot_type, model='auto', align='auto
         keep = json.loads(keep_json)
         pairs = [pairs[k] for k in keep if 0 <= k < len(pairs)]
     if len(pairs) < 3:
-        return json.dumps({'ok': False, 'message': '参与计算的点不足 3 对（当前 %d 对），无法计算' % len(pairs)})
+        return json.dumps({'ok': False, 'message': '参与计算的点不足 3 对（当前 %d 对）：若点号对不上，请把「对齐方式」改成「按顺序」，或改成「按点号」并确认两侧点号一致（%s / %s）' % (len(pairs), (rid or [])[:3], (bid or [])[:3])})
 
     ri = [i for i, _ in pairs]
     bi = [j for _, j in pairs]
@@ -737,7 +742,24 @@ def run_calculation(robot_text, base_text, robot_type, model='auto', align='auto
     Rt = rot[ri] if rot is not None else None
     spread = orientation_spread(Rt) if Rt is not None else 0.0
 
-    use_tcp = (model == 'tcp') or (model == 'auto' and Rt is not None and spread >= 5.0)
+    if model == 'auto':
+        # 先看单一刚体变换够不够：残差已在 ±1mm 阈值内就不必折腾 TCP
+        R0, t0 = rigid_transform_3D(P, Q)
+        e0 = ((R0 @ P.T).T + t0) - Q
+        r0 = float(np.sqrt(np.mean(np.sum(e0 * e0, axis=1))))
+        use_tcp = bool(r0 > 1.0 and Rt is not None and spread >= 5.0)
+        if use_tcp:
+            model_note = '自动判断：单一刚体变换残差 %.2f mm 偏大，且姿态有变化 → 启用 TCP 自动标定' % r0
+        elif r0 <= 1.0:
+            model_note = '自动判断：单一刚体变换残差 %.2f mm 已在阈值内 → 不需要标定 TCP' % r0
+        elif Rt is None:
+            model_note = '自动判断：文件里没有姿态数据 → 只能按「电极帽触点」模型计算'
+        else:
+            model_note = '自动判断：姿态跨度仅 %.1f°，TCP 不可辨识 → 按「电极帽触点」模型计算' % spread
+    else:
+        use_tcp = (model == 'tcp')
+        model_note = ('手动指定：机器人点 = 编程 TCP（标定偏移 c）' if use_tcp
+                      else '手动指定：机器人点 = 电极帽触点（不标定 TCP）')
     if use_tcp:
         if Rt is None:
             return json.dumps({'ok': False, 'message': '这份机器人文件里没有解析到姿态（A/B/C 或四元数），无法自动标定 TCP；请改选「电极帽触点」模型'})
@@ -760,15 +782,17 @@ def run_calculation(robot_text, base_text, robot_type, model='auto', align='auto
     euler_inv, oat_inv = rotation_matrix_to_euler(R_inv)
     quat_inv = quaternion_calculator(R_inv)
 
-    labels = [('P%d' % rid[i]) if (rid and rid[i] is not None) else ('#%d' % (k + 1))
-              for k, i in enumerate(ri)]
+    # 点标签：优先用三坐标文件的点号（基准点号），其次机器人点名，都没有则按序号
+    labels = [('P%d' % bid[j]) if (bid and bid[j] is not None)
+              else (('P%d' % rid[i]) if (rid and rid[i] is not None) else ('#%d' % (k + 1)))
+              for k, (i, j) in enumerate(pairs)]
 
     return json.dumps({
         'ok': True, 'n': int(len(pairs)),
         'model': ('tcp' if tcp is not None else 'plain'),
         'use_tcp': bool(tcp is not None),
         'tcp': (tcp.tolist() if tcp is not None else None),
-        'spread': spread, 'align': mode, 'note': note,
+        'spread': spread, 'align': mode, 'note': note, 'model_note': model_note,
         'labels': labels, 'pairs': [[int(i), int(j)] for i, j in pairs],
         't': t.tolist(), 'R': R.tolist(),
         'euler': euler, 'oat': oat, 'quat': quat,
@@ -930,7 +954,8 @@ function invalidatePairs(msg){
 }
 
 function pairLabel(p){
-  const n = (p.rid != null) ? p.rid : ((p.bid != null) ? p.bid : p.k + 1);
+  // 优先三坐标点号（基准点号），其次机器人点名
+  const n = (p.bid != null) ? p.bid : ((p.rid != null) ? p.rid : p.k + 1);
   return 'P' + n;
 }
 
@@ -1068,6 +1093,7 @@ function renderResult(r){
     $('tcpY').textContent = fmt(r.tcp[1],3);
     $('tcpZ').textContent = fmt(r.tcp[2],3);
     $('tcpNote').textContent = `|c| = ${Math.hypot(...r.tcp).toFixed(3)} mm · 工具姿态跨度 ${r.spread.toFixed(1)}° · 参与 ${r.n} 点`;
+    $('errBadge').title = r.model_note || '';
   } else {
     $('tcpNote').textContent = '';
   }
@@ -1079,7 +1105,8 @@ function renderResult(r){
   $('errNote').textContent = `模型：${r.model === 'tcp' ? '9 参数（机器人点=编程 TCP，已自动标定电极帽偏移 c）' : '单一刚体变换（机器人点=电极帽触点）'}`
     + ` · 参与 ${r.n} 点 · 对齐 ${r.align === 'id' ? '按点号' : '按顺序'}`
     + ` · RMSE ${r.rmse.toFixed(4)} mm · MAE ${r.mae.toFixed(4)} mm · 最大分量误差 ${r.max_abs.toFixed(4)} mm · 阈值 ±1 mm`
-    + (r.use_tcp ? ` · |c| = ${Math.hypot(...r.tcp).toFixed(3)} mm` : '');
+    + (r.use_tcp ? ` · |c| = ${Math.hypot(...r.tcp).toFixed(3)} mm` : '')
+    + (r.model_note ? ` · ${r.model_note}` : '');
 
   /* 误差表 */
   const maxN = Math.max(...r.per_point);
