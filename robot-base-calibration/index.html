@@ -203,6 +203,7 @@ canvas.view3d:active{cursor:grabbing}
 .legendbar span{display:flex; align-items:center; gap:6px}
 .legendbar i{width:8px; height:8px; border-radius:50%; display:inline-block}
 .legendbar i.dot-grad{background:linear-gradient(90deg,#5FA8C7,#D9A24A,#D85C46)}
+.legendbar i.hollow{background:transparent; border:1.5px solid #B8BCC4; width:7px; height:7px}
 .viewhint-inline{margin-left:auto; color:#3D434E}
 
 /* ---------- 源码 ---------- */
@@ -282,6 +283,10 @@ pre.code{
       <div class="marker">02 / 变换结果</div>
       <div class="empty" id="resultEmpty">等待计算 —— 请在左侧载入数据后点击「开始计算」<br>机器人坐标系 ⇐ 基坐标系的刚体变换将显示在这里</div>
       <div id="resultBody" hidden>
+        <div class="chips" id="dirTabs" style="margin-bottom:16px">
+          <button class="chip active" data-d="0"><span class="cdot"></span>变换 ① 基坐标系 → 机器人坐标系</button>
+          <button class="chip" data-d="1"><span class="cdot"></span>变换 ② 机器人坐标系 → 基坐标系</button>
+        </div>
         <div class="res-grid">
           <div class="rcard tri">
             <div class="rk">平移向量 T / mm</div>
@@ -336,19 +341,20 @@ pre.code{
       <div class="marker">04 / 空间视图 · 双坐标系误差对比</div>
       <div class="dualview">
         <div class="viewbox">
-          <div class="viewtitle">机器人坐标系 · 原始示教点</div>
+          <div class="viewtitle">机器人坐标系 · 理论位置（R,t 预测）vs 实际示教点 · 含 BASE 坐标系</div>
           <canvas id="viewRob" class="view3d"></canvas>
         </div>
         <div class="viewbox">
-          <div class="viewtitle">基坐标系叠加 · 三坐标测量点 vs 变换后机器人点</div>
+          <div class="viewtitle">基坐标系 · 三坐标测量点 vs 机器人点回算 · 含 ROBOT 坐标系</div>
           <canvas id="viewBase" class="view3d"></canvas>
         </div>
       </div>
       <div class="legendbar">
-        <span><i style="background:#5FA8C7"></i>三坐标测量点（基准）</span>
-        <span><i class="dot-grad"></i>机器人点 · 颜色 = 配准误差（青 &lt;0.5mm · 黄 0.5–1mm · 红 &gt;1mm）</span>
+        <span><i class="hollow"></i>理论位置（预测，空心）</span>
+        <span><i class="dot-grad"></i>实际位置（实心，颜色 = 误差：青 &lt;0.5mm · 黄 0.5–1mm · 红 &gt;1mm）</span>
         <span><i style="background:#D85C46"></i><span id="resLegend">残差连线</span></span>
-        <span class="viewhint-inline">拖动任一视图旋转 · 滚轮缩放（两视图联动）</span>
+        <span><i style="background:#FF9E40"></i>虚线坐标系 = 对方坐标系在当前坐标系中的位置与姿态</span>
+        <span class="viewhint-inline">各视图独立控制：拖动旋转 · Shift/右键拖动平移 · 滚轮缩放 · 双击复位</span>
       </div>
     </section>
 
@@ -472,15 +478,24 @@ def run_calculation(robot_text, base_text, robot_type):
         return json.dumps({'ok': False, 'message': '选择的文件中点位不等：机器人 %d 点 / 三坐标 %d 点' % (len(rob), len(base))})
     if len(rob) < 3:
         return json.dumps({'ok': False, 'message': '测量点至少为三点'})
-    R, t = rigid_transform_3D(base, rob)        # rob ≈ R @ base + t
+    R, t = rigid_transform_3D(base, rob)        # 正变换：rob ≈ R @ base + t（基 → 机器人）
     euler, oat = rotation_matrix_to_euler(R)
     quat = quaternion_calculator(R)
     err, per_point, rmse, mae = error_calculation(base, rob, R, t)
     aligned = (R.T @ (rob - t).T).T             # 机器人点回算到基坐标系，用于可视化
+
+    # 逆变换：base ≈ R_inv @ rob + t_inv（机器人 → 基）
+    R_inv = R.T
+    t_inv = -R.T @ t
+    euler_inv, oat_inv = rotation_matrix_to_euler(R_inv)
+    quat_inv = quaternion_calculator(R_inv)
+
     return json.dumps({
         'ok': True, 'n': int(len(rob)),
         't': t.tolist(), 'R': R.tolist(),
         'euler': euler, 'oat': oat, 'quat': quat,
+        'inv': {'t': t_inv.tolist(), 'R': R_inv.tolist(),
+                'euler': euler_inv, 'oat': oat_inv, 'quat': quat_inv},
         'err': err.tolist(), 'per_point': per_point.tolist(),
         'rmse': rmse, 'mae': mae,
         'max_abs': float(np.abs(err).max()),
@@ -667,15 +682,7 @@ function renderResult(r){
   $('secErr').hidden = false;
   $('secView').hidden = false;
 
-  $('tx').textContent = fmt(r.t[0],3); $('ty').textContent = fmt(r.t[1],3); $('tz').textContent = fmt(r.t[2],3);
-  $('rx').textContent = fmt(r.euler[0]); $('ry').textContent = fmt(r.euler[1]); $('rz').textContent = fmt(r.euler[2]);
-  $('ro').textContent = fmt(r.oat[0]);  $('ra').textContent = fmt(r.oat[1]);  $('rt').textContent = fmt(r.oat[2]);
-  $('quat').innerHTML = r.quat.map((q,i)=>`<span style="display:flex;justify-content:space-between"><i style="font-style:normal;color:var(--faint);font-size:10px;letter-spacing:.14em">q${i+1}</i><b>${fmt(q,6)}</b></span>`).join('');
-
-  const R = r.R;
-  $('rmat').innerHTML =
-    `<b>旋转矩阵 R</b>（机器人坐标系 → 基坐标系）\n` +
-    R.map(row=>'  '+row.map(v=>fmt(v,6).padStart(11)).join('')).join('\n');
+  renderTransform(r, 0);
 
   const bad = r.max_abs > 1;
   const badge = $('errBadge');
@@ -705,28 +712,54 @@ function renderResult(r){
   });
 }
 
+/* ---- 两个方向的变换：dir=0 基→机器人（正向，主结果），dir=1 机器人→基（逆变换） ---- */
+function renderTransform(r, dir){
+  const d = dir === 1 ? r.inv : r;
+  $('tx').textContent = fmt(d.t[0],3); $('ty').textContent = fmt(d.t[1],3); $('tz').textContent = fmt(d.t[2],3);
+  $('rx').textContent = fmt(d.euler[0]); $('ry').textContent = fmt(d.euler[1]); $('rz').textContent = fmt(d.euler[2]);
+  $('ro').textContent = fmt(d.oat[0]);  $('ra').textContent = fmt(d.oat[1]);  $('rt').textContent = fmt(d.oat[2]);
+  $('quat').innerHTML = d.quat.map((q,i)=>`<span style="display:flex;justify-content:space-between"><i style="font-style:normal;color:var(--faint);font-size:10px;letter-spacing:.14em">q${i+1}</i><b>${fmt(q,6)}</b></span>`).join('');
+  const cap = dir === 1 ? '机器人坐标系 → 基坐标系（逆变换）' : '基坐标系 → 机器人坐标系（正向）';
+  $('rmat').innerHTML =
+    `<b>旋转矩阵 R</b>（${cap}）\n` +
+    d.R.map(row=>'  '+row.map(v=>fmt(v,6).padStart(11)).join('')).join('\n');
+}
+
+document.querySelectorAll('#dirTabs .chip').forEach(btn=>{
+  btn.onclick = ()=>{
+    document.querySelectorAll('#dirTabs .chip').forEach(b=>b.classList.remove('active'));
+    btn.classList.add('active');
+    if(lastResult) renderTransform(lastResult, +btn.dataset.d);
+  };
+});
+
 /* ================= 保存结果 ================= */
 $('btnSave').onclick = ()=>{
   if(!lastResult) return;
   const r = lastResult;
   const mat = a=>a.map(row=>row.map(v=>fmt(v,6).padStart(11)).join('')).join('\n');
+  const blk = (d, title)=>
+`—— ${title} ——
+X Y Z
+  ${fmt(d.t[0],6).padStart(11)}${fmt(d.t[1],6).padStart(11)}${fmt(d.t[2],6).padStart(11)}
+
+Rx Ry Rz
+  ${d.euler.map(v=>v.toFixed(6)).join('  ')}
+
+O A T
+  ${d.oat.map(v=>v.toFixed(6)).join('  ')}
+
+q1 q2 q3 q4
+  ${d.quat.map(v=>v.toFixed(6)).join('  ')}
+
+旋转矩阵 R
+${mat(d.R)}`;
   const txt =
 `坐标变换计算结果（Python/NumPy 引擎）
 
-X Y Z
-  ${fmt(r.t[0],6).padStart(11)}${fmt(r.t[1],6).padStart(11)}${fmt(r.t[2],6).padStart(11)}
+${blk(r,    '变换 ① 基坐标系 → 机器人坐标系（正向）')}
 
-Rx Ry Rz
-  ${r.euler.map(v=>v.toFixed(6)).join('  ')}
-
-O A T
-  ${r.oat.map(v=>v.toFixed(6)).join('  ')}
-
-q1 q2 q3 q4
-  ${r.quat.map(v=>v.toFixed(6)).join('  ')}
-
-旋转矩阵 R
-${mat(r.R)}
+${blk(r.inv,'变换 ② 机器人坐标系 → 基坐标系（逆变换）')}
 
 Err (dX dY dZ / mm)
 ${mat(r.err)}
@@ -742,30 +775,33 @@ ${r.max_abs>1?'\n结果超差':''}`;
 };
 </script>
 <script>
-/* ================= 双坐标系 3D 点云视图（canvas，无依赖，两视图联动） ================= */
-const view = { yaw:-0.7, pitch:0.55, zoom:1, data:null, factor:1 };
+/* ================= 双坐标系 3D 视图：真实坐标 + 理论/实际对比 + 独立控制 ================= */
+function makeViewState(){ return { yaw:-0.7, pitch:0.55, zoom:1, ox:0, oy:0 }; }
+const views = { rob: makeViewState(), bas: makeViewState() };
+let viewData = null, resFactor = 1;
+
 const cvRob = $('viewRob'),  ctxRob  = cvRob.getContext('2d');
 const cvBas = $('viewBase'), ctxBas = cvBas.getContext('2d');
-const CV_LIST = [[cvRob, ctxRob], [cvBas, ctxBas]];
 
 /* 误差 -> 颜色：<0.5mm 青，0.5~1mm 黄，>1mm 红 */
 function errColor(n){
   const t = Math.min(1, n/1.0);
   let c1, c2, k;
   if(t < 0.5){ c1=[95,168,199]; c2=[217,162,74]; k=t/0.5; }
-  else       { c1=[217,162,74]; c2=[216,92,70]; k=(t-0.5)/0.5; }
+  else       { c1=[217,162,74]; c2=[216,92,70];  k=(t-0.5)/0.5; }
   const c = c1.map((v,i)=>Math.round(v+(c2[i]-v)*k));
   return `rgb(${c[0]},${c[1]},${c[2]})`;
 }
 
 function setViewData(r){
-  view.data = r;
+  viewData = r;
+  /* 残差夸大倍率：让最大残差在图上约为场景半径的 10% */
   const maxErr = Math.max(...r.per_point, 1e-9);
   let mn=[1e9,1e9,1e9], mx=[-1e9,-1e9,-1e9];
   r.base.forEach(p=>p.forEach((v,i)=>{mn[i]=Math.min(mn[i],v);mx[i]=Math.max(mx[i],v);}));
   const sceneR = Math.max(mx[0]-mn[0], mx[1]-mn[1], mx[2]-mn[2])/2 || 1;
-  view.factor = Math.max(1, (0.10*sceneR)/maxErr);
-  $('resLegend').textContent = '残差连线 ×' + (view.factor>=10?Math.round(view.factor):view.factor.toFixed(1));
+  resFactor = Math.max(1, (0.10*sceneR)/maxErr);
+  $('resLegend').textContent = '残差连线 ×' + (resFactor>=10?Math.round(resFactor):resFactor.toFixed(1));
   drawAll();
 }
 
@@ -773,126 +809,196 @@ function sizeCanvas(cv){
   const r = cv.getBoundingClientRect(), d = window.devicePixelRatio||1;
   cv.width = Math.max(1, r.width*d); cv.height = Math.max(1, r.height*d);
 }
-window.addEventListener('resize', ()=>{ CV_LIST.forEach(([c])=>sizeCanvas(c)); drawAll(); });
+window.addEventListener('resize', ()=>{ sizeCanvas(cvRob); sizeCanvas(cvBas); drawAll(); });
 
-/* 两视图共享视角：任一画布拖动/滚轮，两个视图同步 */
-let drag = null;
-CV_LIST.forEach(([cv])=>{
-  cv.addEventListener('pointerdown', e=>{ drag={x:e.clientX,y:e.clientY}; cv.setPointerCapture(e.pointerId); });
+/* ---- 每个视图独立控制：拖动旋转 / Shift 或右键拖动平移 / 滚轮缩放 / 双击复位 ---- */
+function bindView(cv, key){
+  let drag = null, pan = false;
+  const v = views[key];
+  cv.addEventListener('contextmenu', e=>e.preventDefault());
+  cv.addEventListener('pointerdown', e=>{
+    pan = (e.button === 2) || e.shiftKey;
+    drag = {x:e.clientX, y:e.clientY};
+    cv.setPointerCapture(e.pointerId);
+  });
   cv.addEventListener('pointermove', e=>{
     if(!drag) return;
-    view.yaw   += (e.clientX-drag.x)*0.008;
-    view.pitch += (e.clientY-drag.y)*0.008;
-    view.pitch = Math.max(-1.45, Math.min(1.45, view.pitch));
+    const dpr = window.devicePixelRatio||1;
+    if(pan){
+      v.ox += (e.clientX-drag.x)*dpr;
+      v.oy += (e.clientY-drag.y)*dpr;
+    }else{
+      v.yaw   += (e.clientX-drag.x)*0.008;
+      v.pitch += (e.clientY-drag.y)*0.008;
+      v.pitch = Math.max(-1.45, Math.min(1.45, v.pitch));
+    }
     drag = {x:e.clientX, y:e.clientY};
     drawAll();
   });
-  cv.addEventListener('pointerup', ()=>drag=null);
+  cv.addEventListener('pointerup', ()=>{ drag=null; pan=false; });
   cv.addEventListener('wheel', e=>{
     e.preventDefault();
-    view.zoom *= e.deltaY<0 ? 1.1 : 0.9;
-    view.zoom = Math.max(0.3, Math.min(5, view.zoom));
+    v.zoom *= e.deltaY<0 ? 1.1 : 0.9;
+    v.zoom = Math.max(0.2, Math.min(8, v.zoom));
     drawAll();
   }, {passive:false});
-});
+  cv.addEventListener('dblclick', ()=>{
+    Object.assign(v, makeViewState());
+    drawAll();
+  });
+}
+bindView(cvRob, 'rob');
+bindView(cvBas, 'bas');
 
-function project(p, c, rad, scale, W, H){
+function project(p, c, rad, scale, W, H, v){
   const x=p[0]-c[0], y=p[1]-c[1], z=p[2]-c[2];
-  const cy=Math.cos(view.yaw), sy=Math.sin(view.yaw);
-  const cp=Math.cos(view.pitch), sp=Math.sin(view.pitch);
+  const cy=Math.cos(v.yaw), sy=Math.sin(v.yaw);
+  const cp=Math.cos(v.pitch), sp=Math.sin(v.pitch);
   const X  =  x*cy + y*sy;
   const Y  = -x*sy + y*cy;
   const Y2 = Y*cp - z*sp;
   const Z2 = Y*sp + z*cp;
   const zn = Z2/(rad||1);
   const d = 3.2, f = d/(d + zn*0.85);
-  return [W/2 + X*scale*f*view.zoom, H/2 - Y2*scale*f*view.zoom, Z2];
+  return [W/2 + v.ox + X*scale*f*v.zoom, H/2 + v.oy - Y2*scale*f*v.zoom, Z2];
 }
 
-/* 通用场景绘制：floor 网格 + 坐标轴 + 点集 */
-function drawScene(ctx, cv, pts, opt){
+/* 场景适配：保留坐标系原点（不再按质心居中），让两坐标系的差异可见 */
+function fitInfo(pts, extra){
+  const all = pts.concat([[0,0,0]], extra||[]);      // 原点 + 外来坐标系原点纳入取景
+  const mn=[1e9,1e9,1e9], mx=[-1e9,-1e9,-1e9];
+  all.forEach(p=>p.forEach((v,i)=>{mn[i]=Math.min(mn[i],v);mx[i]=Math.max(mx[i],v);}));
+  const c = mn.map((v,i)=>(v+mx[i])/2);
+  let rad = 1;
+  all.forEach(p=>{ rad=Math.max(rad, Math.hypot(p[0]-c[0],p[1]-c[1],p[2]-c[2])); });
+  return {c, rad, zFloor: mn[2]};
+}
+
+function drawScene(ctx, cv, pts, v, extra){
   sizeCanvas(cv);
   const W=cv.width, H=cv.height, dpr=window.devicePixelRatio||1;
   ctx.clearRect(0,0,W,H);
-  const c = [0,1,2].map(i=>pts.reduce((s,p)=>s+p[i],0)/pts.length);
-  let rad=0;
-  pts.forEach(p=>{ rad=Math.max(rad, Math.hypot(p[0]-c[0],p[1]-c[1],p[2]-c[2])); });
+  const {c, rad, zFloor} = fitInfo(pts, extra);
   const scale = Math.min(W,H)*0.40/rad;
 
-  /* 地面网格（过最低点的水平面） */
-  const z0 = Math.min(...pts.map(p=>p[2]));
+  /* 地面网格：以原点为中心的基准平面 */
+  const z0 = Math.min(zFloor, 0);
   const gStep = rad/2.2;
   ctx.lineWidth = 1;
   for(let g=-3; g<=3; g++){
-    ctx.strokeStyle = g===0 ? 'rgba(95,168,199,.22)' : 'rgba(95,168,199,.08)';
-    [[ [c[0]+g*gStep, c[1]-3*gStep, z0], [c[0]+g*gStep, c[1]+3*gStep, z0] ],
-     [ [c[0]-3*gStep, c[1]+g*gStep, z0], [c[0]+3*gStep, c[1]+g*gStep, z0] ]].forEach(([a,b])=>{
-      const pa=project(a,c,rad,scale,W,H), pb=project(b,c,rad,scale,W,H);
+    ctx.strokeStyle = g===0 ? 'rgba(95,168,199,.20)' : 'rgba(95,168,199,.07)';
+    [[ [g*gStep, -3*gStep, z0], [g*gStep, 3*gStep, z0] ],
+     [ [-3*gStep, g*gStep, z0], [3*gStep, g*gStep, z0] ]].forEach(([a,b])=>{
+      const pa=project(a,c,rad,scale,W,H,v), pb=project(b,c,rad,scale,W,H,v);
       ctx.beginPath(); ctx.moveTo(pa[0],pa[1]); ctx.lineTo(pb[0],pb[1]); ctx.stroke();
     });
   }
-  /* 坐标轴 */
-  const axis=[[rad*0.9,0,0,'#D85C46','X'],[0,rad*0.9,0,'#A2DB3C','Y'],[0,0,rad*0.9,'#5FA8C7','Z']];
-  const pc = project(c,c,rad,scale,W,H);
+  /* 坐标轴：画在真实原点 (0,0,0)，体现坐标系差异 */
+  const axis=[[rad*1.0,0,0,'#D85C46','X'],[0,rad*1.0,0,'#A2DB3C','Y'],[0,0,rad*1.0,'#5FA8C7','Z']];
+  const po = project([0,0,0],c,rad,scale,W,H,v);
   ctx.font = `${11*dpr}px "Space Mono",monospace`;
   axis.forEach(([ax,ay,az,col,name])=>{
-    const pe = project([c[0]+ax,c[1]+ay,c[2]+az],c,rad,scale,W,H);
-    ctx.strokeStyle=col; ctx.globalAlpha=.55; ctx.lineWidth=1.4;
-    ctx.beginPath(); ctx.moveTo(pc[0],pc[1]); ctx.lineTo(pe[0],pe[1]); ctx.stroke();
+    const pe = project([ax,ay,az],c,rad,scale,W,H,v);
+    ctx.strokeStyle=col; ctx.globalAlpha=.7; ctx.lineWidth=1.6;
+    ctx.beginPath(); ctx.moveTo(po[0],po[1]); ctx.lineTo(pe[0],pe[1]); ctx.stroke();
     ctx.globalAlpha=1; ctx.fillStyle=col; ctx.fillText(name, pe[0]+5, pe[1]-5);
   });
+  /* 原点标记 */
+  ctx.strokeStyle='rgba(251,251,251,.85)'; ctx.lineWidth=1.4;
+  ctx.beginPath(); ctx.arc(po[0],po[1],4.5*dpr,0,7); ctx.stroke();
+  ctx.fillStyle='rgba(251,251,251,.85)';
+  ctx.fillText('O', po[0]+8*dpr, po[1]+12*dpr);
+
   return {c, rad, scale, W, H, dpr};
 }
 
-function drawAll(){
-  if(!view.data){ CV_LIST.forEach(([c])=>sizeCanvas(c)); return; }
-  const r = view.data;
+/* 外来坐标系：在当前视图坐标系中画出另一坐标系的原点与三轴（虚线） */
+function drawFrame(ctx, s, v, origin, R, name){
+  const {c, rad, scale, W, H, dpr} = s;
+  const len = rad*0.62;
+  const cols = ['#D85C46','#A2DB3C','#5FA8C7'], names = ['X','Y','Z'];
+  const po = project(origin, c, rad, scale, W, H, v);
+  ctx.save();
+  ctx.setLineDash([5*dpr, 4*dpr]);
+  ctx.font = `${10*dpr}px "Space Mono",monospace`;
+  for(let k=0;k<3;k++){
+    const dir = [R[0][k], R[1][k], R[2][k]];         // R 的第 k 列 = 该轴在当前坐标系中的方向
+    const pe = project([origin[0]+dir[0]*len, origin[1]+dir[1]*len, origin[2]+dir[2]*len], c, rad, scale, W, H, v);
+    ctx.strokeStyle = cols[k]; ctx.globalAlpha = .55; ctx.lineWidth = 1.3;
+    ctx.beginPath(); ctx.moveTo(po[0],po[1]); ctx.lineTo(pe[0],pe[1]); ctx.stroke();
+    ctx.globalAlpha = .8; ctx.fillStyle = cols[k];
+    ctx.fillText(names[k]+"'", pe[0]+4, pe[1]-4);
+  }
+  ctx.restore();
+  /* 外来原点：方块标记 + 名称 */
+  ctx.strokeStyle = 'rgba(255,158,64,.95)'; ctx.lineWidth = 1.4*dpr;
+  ctx.strokeRect(po[0]-4*dpr, po[1]-4*dpr, 8*dpr, 8*dpr);
+  ctx.fillStyle = 'rgba(255,158,64,.95)';
+  ctx.font = `${10.5*dpr}px "Space Mono",monospace`;
+  ctx.fillText(name, po[0]+8*dpr, po[1]+14*dpr);
+}
 
-  /* ---- 左视图：机器人坐标系原始示教点，颜色=该点配准误差 ---- */
-  const s1 = drawScene(ctxRob, cvRob, r.rob, {});
-  r.rob.map((p,i)=>({i, d:project(p,s1.c,s1.rad,s1.scale,s1.W,s1.H)[2]}))
+function drawPoint(ctx, pp, r, fill, dpr, hollow){
+  if(hollow){
+    ctx.strokeStyle = fill; ctx.lineWidth = 1.6*dpr;
+    ctx.beginPath(); ctx.arc(pp[0], pp[1], r, 0, 7); ctx.stroke();
+  }else{
+    ctx.fillStyle = fill;
+    ctx.shadowColor = fill; ctx.shadowBlur = 9*dpr;
+    ctx.beginPath(); ctx.arc(pp[0], pp[1], r, 0, 7); ctx.fill();
+    ctx.shadowBlur = 0;
+  }
+}
+
+function drawAll(){
+  sizeCanvas(cvRob); sizeCanvas(cvBas);
+  if(!viewData) return;
+  const r = viewData;
+  /* 理论位置（机器人坐标系下由 R,t 预测的示教点）：pred = R @ base + t = rob - err */
+  const pred = r.rob.map((p,i)=>p.map((v,k)=> v - r.err[i][k]));
+
+  /* ---- 左视图：机器人坐标系（真实坐标）—— 理论(空心) vs 实际示教点(实心,误差着色) ---- */
+  /* 基坐标系在机器人坐标系中的样子：原点 = t，轴方向 = R 的列 */
+  const s1 = drawScene(ctxRob, cvRob, r.rob, views.rob, [r.t]);
+  drawFrame(ctxRob, s1, views.rob, r.t, r.R, 'BASE');
+  r.rob.map((p,i)=>({i, d:project(p,s1.c,s1.rad,s1.scale,s1.W,s1.H,views.rob)[2]}))
        .sort((a,b)=>a.d-b.d)
        .forEach(({i})=>{
-    const pp = project(r.rob[i], s1.c, s1.rad, s1.scale, s1.W, s1.H);
-    const col = errColor(r.per_point[i]);
-    ctxRob.fillStyle = col;
-    ctxRob.shadowColor = col; ctxRob.shadowBlur = 9*s1.dpr;
-    ctxRob.beginPath(); ctxRob.arc(pp[0], pp[1], 4*s1.dpr, 0, 7); ctxRob.fill();
-    ctxRob.shadowBlur = 0;
-    ctxRob.fillStyle = 'rgba(184,188,196,.8)';
-    ctxRob.fillText('P'+(i+1), pp[0]+8*s1.dpr, pp[1]-7*s1.dpr);
+    const pa = project(r.rob[i],  s1.c, s1.rad, s1.scale, s1.W, s1.H, views.rob);
+    const pt = project(pred[i],   s1.c, s1.rad, s1.scale, s1.W, s1.H, views.rob);
+    /* 残差连线（夸大）：实际点 -> 理论方向 */
+    const exagg = r.rob[i].map((v,k)=> v + (pred[i][k]-v)*resFactor);
+    const pe = project(exagg, s1.c, s1.rad, s1.scale, s1.W, s1.H, views.rob);
+    ctxRob.strokeStyle='rgba(216,92,70,.65)'; ctxRob.lineWidth=1;
+    ctxRob.beginPath(); ctxRob.moveTo(pa[0],pa[1]); ctxRob.lineTo(pe[0],pe[1]); ctxRob.stroke();
+    drawPoint(ctxRob, pt, 4.6*s1.dpr, 'rgba(184,188,196,.9)', s1.dpr, true);   // 理论（空心）
+    drawPoint(ctxRob, pa, 3.8*s1.dpr, errColor(r.per_point[i]), s1.dpr, false); // 实际（实心）
+    ctxRob.fillStyle='rgba(184,188,196,.8)';
+    ctxRob.fillText('P'+(i+1), pa[0]+8*s1.dpr, pa[1]-7*s1.dpr);
   });
 
-  /* ---- 右视图：基坐标系叠加，基准点 vs 变换后机器人点 + 残差连线 ---- */
-  const s2 = drawScene(ctxBas, cvBas, r.base, {});
-  r.base.map((p,i)=>({i, d:project(p,s2.c,s2.rad,s2.scale,s2.W,s2.H)[2]}))
+  /* ---- 右视图：基坐标系（真实坐标）—— 三坐标测量(基准) vs 机器人点回算(误差着色) ---- */
+  /* 机器人坐标系在基坐标系中的样子：原点 = t_inv，轴方向 = Rᵀ 的列 */
+  const s2 = drawScene(ctxBas, cvBas, r.base, views.bas, [r.inv.t]);
+  drawFrame(ctxBas, s2, views.bas, r.inv.t, r.inv.R, 'ROBOT');
+  r.base.map((p,i)=>({i, d:project(p,s2.c,s2.rad,s2.scale,s2.W,s2.H,views.bas)[2]}))
         .sort((a,b)=>a.d-b.d)
         .forEach(({i})=>{
-    const pb = project(r.base[i],    s2.c, s2.rad, s2.scale, s2.W, s2.H);
-    const pa = project(r.aligned[i], s2.c, s2.rad, s2.scale, s2.W, s2.H);
-    /* 残差连线（夸大显示，突出机器人点与三坐标测量点的偏差） */
-    const exagg = r.base[i].map((v,k)=> v + (r.aligned[i][k]-v)*view.factor);
-    const pe = project(exagg, s2.c, s2.rad, s2.scale, s2.W, s2.H);
-    ctxBas.strokeStyle = 'rgba(216,92,70,.65)'; ctxBas.lineWidth = 1;
+    const pb = project(r.base[i],    s2.c, s2.rad, s2.scale, s2.W, s2.H, views.bas);
+    const pa = project(r.aligned[i], s2.c, s2.rad, s2.scale, s2.W, s2.H, views.bas);
+    const exagg = r.base[i].map((v,k)=> v + (r.aligned[i][k]-v)*resFactor);
+    const pe = project(exagg, s2.c, s2.rad, s2.scale, s2.W, s2.H, views.bas);
+    ctxBas.strokeStyle='rgba(216,92,70,.65)'; ctxBas.lineWidth=1;
     ctxBas.beginPath(); ctxBas.moveTo(pb[0],pb[1]); ctxBas.lineTo(pe[0],pe[1]); ctxBas.stroke();
-    /* 基准点：青色 */
-    ctxBas.fillStyle = '#5FA8C7';
-    ctxBas.shadowColor = 'rgba(95,168,199,.8)'; ctxBas.shadowBlur = 8*s2.dpr;
-    ctxBas.beginPath(); ctxBas.arc(pb[0], pb[1], 3.4*s2.dpr, 0, 7); ctxBas.fill();
-    /* 变换后的机器人点：按误差着色 */
-    const col = errColor(r.per_point[i]);
-    ctxBas.fillStyle = col;
-    ctxBas.shadowColor = col;
-    ctxBas.beginPath(); ctxBas.arc(pa[0], pa[1], 2.8*s2.dpr, 0, 7); ctxBas.fill();
-    ctxBas.shadowBlur = 0;
-    /* 点号 + 误差值标注 */
-    ctxBas.fillStyle = 'rgba(184,188,196,.8)';
+    drawPoint(ctxBas, pb, 3.4*s2.dpr, '#5FA8C7', s2.dpr, false);                 // 三坐标测量（实际基准）
+    drawPoint(ctxBas, pa, 3.0*s2.dpr, errColor(r.per_point[i]), s2.dpr, false);   // 机器人点回算
+    ctxBas.fillStyle='rgba(184,188,196,.8)';
     ctxBas.fillText('P'+(i+1), pb[0]+7*s2.dpr, pb[1]-6*s2.dpr);
-    ctxBas.fillStyle = col;
+    ctxBas.fillStyle=errColor(r.per_point[i]);
     ctxBas.fillText(r.per_point[i].toFixed(3), pa[0]+7*s2.dpr, pa[1]+12*s2.dpr);
   });
 }
-CV_LIST.forEach(([c])=>sizeCanvas(c));
+sizeCanvas(cvRob); sizeCanvas(cvBas);
 </script>
 </body>
 </html>
